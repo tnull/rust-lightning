@@ -25,7 +25,7 @@ use chain;
 use chain::Access;
 use ln::features::{ChannelFeatures, NodeFeatures};
 use ln::msgs::{DecodeError, ErrorAction, Init, LightningError, RoutingMessageHandler, NetAddress, MAX_VALUE_MSAT};
-use ln::msgs::{ChannelAnnouncement, ChannelUpdate, NodeAnnouncement, OptionalField, GossipTimestampFilter};
+use ln::msgs::{ChannelAnnouncement, ChannelUpdate, NodeAnnouncement, GossipTimestampFilter};
 use ln::msgs::{QueryChannelRange, ReplyChannelRange, QueryShortChannelIds, ReplyShortChannelIdsEnd};
 use ln::msgs;
 use util::ser::{Readable, ReadableArgs, Writeable, Writer};
@@ -611,7 +611,7 @@ pub struct ChannelUpdateInfo {
 	/// The minimum value, which must be relayed to the next hop via the channel
 	pub htlc_minimum_msat: u64,
 	/// The maximum value which may be relayed to the next hop via the channel.
-	pub htlc_maximum_msat: Option<u64>,
+	pub htlc_maximum_msat: u64,
 	/// Fees charged when the channel is used for routing
 	pub fees: RoutingFees,
 	/// Most recent update for the channel received from the network
@@ -739,7 +739,7 @@ pub struct DirectedChannelInfo<'a> {
 impl<'a> DirectedChannelInfo<'a> {
 	#[inline]
 	fn new(channel: &'a ChannelInfo, direction: Option<&'a ChannelUpdateInfo>) -> Self {
-		let htlc_maximum_msat = direction.and_then(|direction| direction.htlc_maximum_msat);
+		let htlc_maximum_msat = direction.map(|direction| direction.htlc_maximum_msat);
 		let capacity_msat = channel.capacity_sats.map(|capacity_sats| capacity_sats * 1000);
 
 		let (htlc_maximum_msat, effective_capacity) = match (htlc_maximum_msat, capacity_msat) {
@@ -1452,17 +1452,19 @@ impl<L: Deref> NetworkGraph<L> where L::Target: Logger {
 		match channels.get_mut(&msg.short_channel_id) {
 			None => return Err(LightningError{err: "Couldn't find channel for update".to_owned(), action: ErrorAction::IgnoreError}),
 			Some(channel) => {
-				if let OptionalField::Present(htlc_maximum_msat) = msg.htlc_maximum_msat {
-					if htlc_maximum_msat > MAX_VALUE_MSAT {
-						return Err(LightningError{err: "htlc_maximum_msat is larger than maximum possible msats".to_owned(), action: ErrorAction::IgnoreError});
-					}
+				if msg.htlc_maximum_msat > MAX_VALUE_MSAT {
+					return Err(LightningError{err:
+						"htlc_maximum_msat is larger than maximum possible msats".to_owned(),
+						action: ErrorAction::IgnoreError});
+				}
 
-					if let Some(capacity_sats) = channel.capacity_sats {
-						// It's possible channel capacity is available now, although it wasn't available at announcement (so the field is None).
-						// Don't query UTXO set here to reduce DoS risks.
-						if capacity_sats > MAX_VALUE_MSAT / 1000 || htlc_maximum_msat > capacity_sats * 1000 {
-							return Err(LightningError{err: "htlc_maximum_msat is larger than channel capacity or capacity is bogus".to_owned(), action: ErrorAction::IgnoreError});
-						}
+				if let Some(capacity_sats) = channel.capacity_sats {
+					// It's possible channel capacity is available now, although it wasn't available at announcement (so the field is None).
+					// Don't query UTXO set here to reduce DoS risks.
+					if capacity_sats > MAX_VALUE_MSAT / 1000 || msg.htlc_maximum_msat > capacity_sats * 1000 {
+						return Err(LightningError{err:
+							"htlc_maximum_msat is larger than channel capacity or capacity is bogus".to_owned(),
+							action: ErrorAction::IgnoreError});
 					}
 				}
 				macro_rules! check_update_latest {
@@ -1496,7 +1498,7 @@ impl<L: Deref> NetworkGraph<L> where L::Target: Logger {
 							last_update: msg.timestamp,
 							cltv_expiry_delta: msg.cltv_expiry_delta,
 							htlc_minimum_msat: msg.htlc_minimum_msat,
-							htlc_maximum_msat: if let OptionalField::Present(max_value) = msg.htlc_maximum_msat { Some(max_value) } else { None },
+							htlc_maximum_msat: msg.htlc_maximum_msat,
 							fees: RoutingFees {
 								base_msat: msg.fee_base_msat,
 								proportional_millionths: msg.fee_proportional_millionths,
@@ -1628,7 +1630,7 @@ mod tests {
 	use ln::PaymentHash;
 	use ln::features::{ChannelFeatures, InitFeatures, NodeFeatures};
 	use routing::gossip::{P2PGossipSync, NetworkGraph, NetworkUpdate, MAX_EXCESS_BYTES_FOR_RELAY};
-	use ln::msgs::{Init, OptionalField, RoutingMessageHandler, UnsignedNodeAnnouncement, NodeAnnouncement,
+	use ln::msgs::{Init, RoutingMessageHandler, UnsignedNodeAnnouncement, NodeAnnouncement,
 		UnsignedChannelAnnouncement, ChannelAnnouncement, UnsignedChannelUpdate, ChannelUpdate,
 		ReplyChannelRange, QueryChannelRange, QueryShortChannelIds, MAX_VALUE_MSAT};
 	use util::test_utils;
@@ -1752,7 +1754,7 @@ mod tests {
 			flags: 0,
 			cltv_expiry_delta: 144,
 			htlc_minimum_msat: 1_000_000,
-			htlc_maximum_msat: OptionalField::Absent,
+			htlc_maximum_msat: 1_000_000,
 			fee_base_msat: 10_000,
 			fee_proportional_millionths: 20,
 			excess_data: Vec::new()
@@ -1973,7 +1975,7 @@ mod tests {
 		let valid_channel_update = get_signed_channel_update(|_| {}, node_1_privkey, &secp_ctx);
 		match gossip_sync.handle_channel_update(&valid_channel_update) {
 			Ok(res) => assert!(res),
-			_ => panic!()
+			_ => panic!(),
 		};
 
 		{
@@ -2006,7 +2008,7 @@ mod tests {
 		};
 
 		let valid_channel_update = get_signed_channel_update(|unsigned_channel_update| {
-			unsigned_channel_update.htlc_maximum_msat = OptionalField::Present(MAX_VALUE_MSAT + 1);
+			unsigned_channel_update.htlc_maximum_msat = MAX_VALUE_MSAT + 1;
 			unsigned_channel_update.timestamp += 110;
 		}, node_1_privkey, &secp_ctx);
 		match gossip_sync.handle_channel_update(&valid_channel_update) {
@@ -2015,7 +2017,7 @@ mod tests {
 		};
 
 		let valid_channel_update = get_signed_channel_update(|unsigned_channel_update| {
-			unsigned_channel_update.htlc_maximum_msat = OptionalField::Present(amount_sats * 1000 + 1);
+			unsigned_channel_update.htlc_maximum_msat = amount_sats * 1000 + 1;
 			unsigned_channel_update.timestamp += 110;
 		}, node_1_privkey, &secp_ctx);
 		match gossip_sync.handle_channel_update(&valid_channel_update) {
