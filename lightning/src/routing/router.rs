@@ -3623,7 +3623,7 @@ mod tests {
 			flags: 0,
 			cltv_expiry_delta: 0,
 			htlc_minimum_msat: 0,
-			htlc_maximum_msat: 250_000,
+			htlc_maximum_msat: 250_000_000,
 			fee_base_msat: 0,
 			fee_proportional_millionths: 0,
 			excess_data: Vec::new()
