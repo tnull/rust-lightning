@@ -1985,7 +1985,10 @@ mod tests {
 
 		match gossip_sync.handle_channel_update(&valid_channel_update) {
 			Ok(res) => assert!(res),
-			Err(_) => panic!(),
+			Err(err) => {
+				println!("error: {:?}", err);
+				panic!();
+			}
 		};
 	}
 
@@ -3764,7 +3767,7 @@ mod tests {
 			flags: 0,
 			cltv_expiry_delta: (3 << 4) | 1,
 			htlc_minimum_msat: 0,
-			htlc_maximum_msat: MAX_VALUE_MSAT,
+			htlc_maximum_msat: 15_000,
 			fee_base_msat: 0,
 			fee_proportional_millionths: 0,
 			excess_data: Vec::new()
@@ -3776,7 +3779,7 @@ mod tests {
 			flags: 1,
 			cltv_expiry_delta: (3 << 4) | 2,
 			htlc_minimum_msat: 0,
-			htlc_maximum_msat: MAX_VALUE_MSAT,
+			htlc_maximum_msat: 15_000,
 			fee_base_msat: 100,
 			fee_proportional_millionths: 0,
 			excess_data: Vec::new()
