@@ -28,7 +28,7 @@ use ln::msgs::{DecodeError, ErrorAction, Init, LightningError, RoutingMessageHan
 use ln::msgs::{ChannelAnnouncement, ChannelUpdate, NodeAnnouncement, GossipTimestampFilter};
 use ln::msgs::{QueryChannelRange, ReplyChannelRange, QueryShortChannelIds, ReplyShortChannelIdsEnd};
 use ln::msgs;
-use util::ser::{Readable, ReadableArgs, Writeable, Writer};
+use util::ser::{Readable, ReadableArgs, Writeable, Writer, MaybeReadable};
 use util::logger::{Logger, Level};
 use util::events::{Event, EventHandler, MessageSendEvent, MessageSendEventsProvider};
 use util::scid_utils::{block_from_scid, scid_from_parts, MAX_SCID_BLOCK};
@@ -628,15 +628,77 @@ impl fmt::Display for ChannelUpdateInfo {
 	}
 }
 
-impl_writeable_tlv_based!(ChannelUpdateInfo, {
-	(0, last_update, required),
-	(2, enabled, required),
-	(4, cltv_expiry_delta, required),
-	(6, htlc_minimum_msat, required),
-	(8, htlc_maximum_msat, required),
-	(10, fees, required),
-	(12, last_update_message, required),
-});
+impl Writeable for ChannelUpdateInfo {
+	fn write<W: ::util::ser::Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		write_tlv_fields!(writer, {
+			(0, self.last_update, required),
+			(2, self.enabled, required),
+			(4, self.cltv_expiry_delta, required),
+			(6, self.htlc_minimum_msat, required),
+			(8, self.htlc_maximum_msat, required),
+			(10, self.fees, required),
+			(12, self.last_update_message, required),
+		});
+		Ok(())
+	}
+
+	#[inline]
+	fn serialized_length(&self) -> usize {
+		use util::ser::BigSize;
+		let len = {
+			#[allow(unused_mut)]
+			let mut len = ::util::ser::LengthCalculatingWriter(0);
+			get_varint_length_prefixed_tlv_length!(len, 0, self.last_update, required);
+			get_varint_length_prefixed_tlv_length!(len, 2, self.enabled, required);
+			get_varint_length_prefixed_tlv_length!(len, 4, self.cltv_expiry_delta, required);
+			get_varint_length_prefixed_tlv_length!(len, 6, self.htlc_minimum_msat, required);
+			get_varint_length_prefixed_tlv_length!(len, 8, self.htlc_maximum_msat, required);
+			get_varint_length_prefixed_tlv_length!(len, 10, self.fees, required);
+			get_varint_length_prefixed_tlv_length!(len, 12, self.last_update_message, required);
+			len.0
+		};
+		let mut len_calc = ::util::ser::LengthCalculatingWriter(0);
+		BigSize(len as u64).write(&mut len_calc).expect("No in-memory data may fail to serialize");
+		len + len_calc.0
+	}
+
+}
+
+impl MaybeReadable for ChannelUpdateInfo {
+	fn read<R: io::Read>(reader: &mut R) -> Result<Option<Self>, DecodeError> {
+		init_tlv_field_var!(last_update, required);
+		init_tlv_field_var!(enabled, required);
+		init_tlv_field_var!(cltv_expiry_delta, required);
+		init_tlv_field_var!(htlc_minimum_msat, required);
+		init_tlv_field_var!(htlc_maximum_msat, required);
+		init_tlv_field_var!(fees, required);
+		init_tlv_field_var!(last_update_message, required);
+
+		read_tlv_fields!(reader, {
+			(0, last_update, required),
+			(2, enabled, required),
+			(4, cltv_expiry_delta, required),
+			(6, htlc_minimum_msat, required),
+			(8, htlc_maximum_msat, required),
+			(10, fees, required),
+			(12, last_update_message, required)
+		});
+			
+		if let Some(htlc_maximum_msat) = htlc_maximum_msat.0 {
+			Ok(Some(ChannelUpdateInfo {
+				last_update: init_tlv_based_struct_field!(last_update, required),
+				enabled: init_tlv_based_struct_field!(enabled, required),
+				cltv_expiry_delta: init_tlv_based_struct_field!(cltv_expiry_delta, required),
+				htlc_minimum_msat: init_tlv_based_struct_field!(htlc_minimum_msat, required),
+				htlc_maximum_msat,
+				fees: init_tlv_based_struct_field!(fees, required),
+				last_update_message: init_tlv_based_struct_field!(last_update_message, required),
+			}))
+		} else {
+			Ok(None)
+		}
+	}
+}
 
 #[derive(Clone, Debug, PartialEq)]
 /// Details about a channel (both directions).
@@ -715,16 +777,77 @@ impl fmt::Display for ChannelInfo {
 	}
 }
 
-impl_writeable_tlv_based!(ChannelInfo, {
-	(0, features, required),
-	(1, announcement_received_time, (default_value, 0)),
-	(2, node_one, required),
-	(4, one_to_two, required),
-	(6, node_two, required),
-	(8, two_to_one, required),
-	(10, capacity_sats, required),
-	(12, announcement_message, required),
-});
+impl Writeable for ChannelInfo {
+	fn write<W: ::util::ser::Writer>(&self, writer: &mut W) -> Result<(), io::Error> {
+		write_tlv_fields!(writer, {
+			(0, self.features, required),
+			(1, self.announcement_received_time, (default_value, 0)),
+			(2, self.node_one, required),
+			(4, self.one_to_two, required),
+			(6, self.node_two, required),
+			(8, self.two_to_one, required),
+			(10, self.capacity_sats, required),
+			(12, self.announcement_message, required),
+		});
+		Ok(())
+	}
+
+	#[inline]
+	fn serialized_length(&self) -> usize {
+		use util::ser::BigSize;
+		let len = {
+			#[allow(unused_mut)]
+			let mut len = ::util::ser::LengthCalculatingWriter(0);
+			get_varint_length_prefixed_tlv_length!(len, 0, self.features, required);
+			get_varint_length_prefixed_tlv_length!(len, 1, self.announcement_received_time, (default_value, 0));
+			get_varint_length_prefixed_tlv_length!(len, 2, self.node_one, required);
+			get_varint_length_prefixed_tlv_length!(len, 4, self.one_to_two, required);
+			get_varint_length_prefixed_tlv_length!(len, 6, self.node_two, required);
+			get_varint_length_prefixed_tlv_length!(len, 8, self.two_to_one, required);
+			get_varint_length_prefixed_tlv_length!(len, 10, self.capacity_sats, required);
+			get_varint_length_prefixed_tlv_length!(len, 12, self.announcement_message, required);
+			len.0
+		};
+		let mut len_calc = ::util::ser::LengthCalculatingWriter(0);
+		BigSize(len as u64).write(&mut len_calc).expect("No in-memory data may fail to serialize");
+		len + len_calc.0
+	}
+
+}
+
+impl Readable for ChannelInfo {
+	fn read<R: io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		init_tlv_field_var!(features, required);
+		init_tlv_field_var!(announcement_received_time, (default_value, 0));
+		init_tlv_field_var!(node_one, required);
+		let mut one_to_two = None;
+		init_tlv_field_var!(node_two, required);
+		let mut two_to_one = None;
+		init_tlv_field_var!(capacity_sats, required);
+		init_tlv_field_var!(announcement_message, required);
+		read_tlv_fields!(reader, {
+			(0, features, required),
+			(1, announcement_received_time, (default_value, 0)),
+			(2, node_one, required),
+			(4, one_to_two, ignorable),
+			(6, node_two, required),
+			(8, two_to_one, ignorable),
+			(10, capacity_sats, required),
+			(12, announcement_message, required),
+		});
+
+		Ok(ChannelInfo {
+			features: init_tlv_based_struct_field!(features, required),
+			node_one: init_tlv_based_struct_field!(node_one, required),
+			one_to_two,
+			node_two: init_tlv_based_struct_field!(node_two, required),
+			two_to_one,
+			capacity_sats: init_tlv_based_struct_field!(capacity_sats, required),
+			announcement_message: init_tlv_based_struct_field!(announcement_message, required),
+			announcement_received_time: init_tlv_based_struct_field!(announcement_received_time, (default_value, 0)),
+		})
+	}
+}
 
 /// A wrapper around [`ChannelInfo`] representing information about the channel as directed from a
 /// source node to a target node.
