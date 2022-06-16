@@ -1070,16 +1070,32 @@ impl<L: Deref> ReadableArgs<L> for NetworkGraph<L> where L::Target: Logger {
 		let mut channels = BTreeMap::new();
 		for _ in 0..channels_count {
 			let chan_id: u64 = Readable::read(reader)?;
-			let chan_info = Readable::read(reader)?;
+			let chan_info: ChannelInfo = match Readable::read(reader) {
+				Ok(info) => info,
+				Err(err) => {
+					log_debug!(logger, "Failed to decode channel {} due to error: {}", chan_id, err);
+					continue;
+				},
+			};
 			channels.insert(chan_id, chan_info);
 		}
+		log_debug!(logger, "Read a total of {} channels, skipped {}.", channels.len(), channels_count - channels.len() as u64);
+
 		let nodes_count: u64 = Readable::read(reader)?;
 		let mut nodes = BTreeMap::new();
 		for _ in 0..nodes_count {
 			let node_id = Readable::read(reader)?;
-			let node_info = Readable::read(reader)?;
+			let node_info = match Readable::read(reader) {
+				Ok(info) => info,
+				Err(err) => {
+					log_debug!(logger, "Failed to decode node {:?} due to error: {}", node_id, err);
+					continue;
+				},
+			};
 			nodes.insert(node_id, node_info);
 		}
+		log_debug!(logger, "Read a total of {} nodes, skipped {}.", nodes.len(), nodes_count - nodes.len() as u64);
+
 
 		let mut last_rapid_gossip_sync_timestamp: Option<u32> = None;
 		read_tlv_fields!(reader, {
