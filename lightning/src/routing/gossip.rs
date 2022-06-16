@@ -641,27 +641,6 @@ impl Writeable for ChannelUpdateInfo {
 		});
 		Ok(())
 	}
-
-	#[inline]
-	fn serialized_length(&self) -> usize {
-		use util::ser::BigSize;
-		let len = {
-			#[allow(unused_mut)]
-			let mut len = ::util::ser::LengthCalculatingWriter(0);
-			get_varint_length_prefixed_tlv_length!(len, 0, self.last_update, required);
-			get_varint_length_prefixed_tlv_length!(len, 2, self.enabled, required);
-			get_varint_length_prefixed_tlv_length!(len, 4, self.cltv_expiry_delta, required);
-			get_varint_length_prefixed_tlv_length!(len, 6, self.htlc_minimum_msat, required);
-			get_varint_length_prefixed_tlv_length!(len, 8, self.htlc_maximum_msat, required);
-			get_varint_length_prefixed_tlv_length!(len, 10, self.fees, required);
-			get_varint_length_prefixed_tlv_length!(len, 12, self.last_update_message, required);
-			len.0
-		};
-		let mut len_calc = ::util::ser::LengthCalculatingWriter(0);
-		BigSize(len as u64).write(&mut len_calc).expect("No in-memory data may fail to serialize");
-		len + len_calc.0
-	}
-
 }
 
 impl MaybeReadable for ChannelUpdateInfo {
@@ -670,7 +649,7 @@ impl MaybeReadable for ChannelUpdateInfo {
 		init_tlv_field_var!(enabled, required);
 		init_tlv_field_var!(cltv_expiry_delta, required);
 		init_tlv_field_var!(htlc_minimum_msat, required);
-		init_tlv_field_var!(htlc_maximum_msat, required);
+		let mut htlc_maximum_msat = None;
 		init_tlv_field_var!(fees, required);
 		init_tlv_field_var!(last_update_message, required);
 
@@ -679,12 +658,12 @@ impl MaybeReadable for ChannelUpdateInfo {
 			(2, enabled, required),
 			(4, cltv_expiry_delta, required),
 			(6, htlc_minimum_msat, required),
-			(8, htlc_maximum_msat, required),
+			(8, htlc_maximum_msat, option),
 			(10, fees, required),
 			(12, last_update_message, required)
 		});
 			
-		if let Some(htlc_maximum_msat) = htlc_maximum_msat.0 {
+		if let Some(htlc_maximum_msat) = htlc_maximum_msat {
 			Ok(Some(ChannelUpdateInfo {
 				last_update: init_tlv_based_struct_field!(last_update, required),
 				enabled: init_tlv_based_struct_field!(enabled, required),
@@ -791,28 +770,6 @@ impl Writeable for ChannelInfo {
 		});
 		Ok(())
 	}
-
-	#[inline]
-	fn serialized_length(&self) -> usize {
-		use util::ser::BigSize;
-		let len = {
-			#[allow(unused_mut)]
-			let mut len = ::util::ser::LengthCalculatingWriter(0);
-			get_varint_length_prefixed_tlv_length!(len, 0, self.features, required);
-			get_varint_length_prefixed_tlv_length!(len, 1, self.announcement_received_time, (default_value, 0));
-			get_varint_length_prefixed_tlv_length!(len, 2, self.node_one, required);
-			get_varint_length_prefixed_tlv_length!(len, 4, self.one_to_two, required);
-			get_varint_length_prefixed_tlv_length!(len, 6, self.node_two, required);
-			get_varint_length_prefixed_tlv_length!(len, 8, self.two_to_one, required);
-			get_varint_length_prefixed_tlv_length!(len, 10, self.capacity_sats, required);
-			get_varint_length_prefixed_tlv_length!(len, 12, self.announcement_message, required);
-			len.0
-		};
-		let mut len_calc = ::util::ser::LengthCalculatingWriter(0);
-		BigSize(len as u64).write(&mut len_calc).expect("No in-memory data may fail to serialize");
-		len + len_calc.0
-	}
-
 }
 
 impl Readable for ChannelInfo {
