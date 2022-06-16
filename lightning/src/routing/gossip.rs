@@ -653,6 +653,7 @@ impl MaybeReadable for ChannelUpdateInfo {
 		init_tlv_field_var!(fees, required);
 		init_tlv_field_var!(last_update_message, required);
 
+		println!("BEFORE CHANNEL_UPDATE_INFO read_tlv_fields");
 		read_tlv_fields!(reader, {
 			(0, last_update, required),
 			(2, enabled, required),
@@ -782,6 +783,8 @@ impl Readable for ChannelInfo {
 		let mut two_to_one = None;
 		init_tlv_field_var!(capacity_sats, required);
 		init_tlv_field_var!(announcement_message, required);
+
+		println!("BEFORE CHANNEL_INFO read_tlv_fields");
 		read_tlv_fields!(reader, {
 			(0, features, required),
 			(1, announcement_received_time, (default_value, 0)),

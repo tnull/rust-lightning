@@ -131,9 +131,11 @@ macro_rules! check_missing_tlv {
 	($last_seen_type: expr, $type: expr, $field: ident, required) => {{
 		#[allow(unused_comparisons)] // Note that $type may be 0 making the second comparison always true
 		let missing_req_type = $last_seen_type.is_none() || $last_seen_type.unwrap() < $type;
+		println!("B missing_req_type: {}, last_seen_type: {:?}", std::stringify!($field), $last_seen_type);
 		if missing_req_type {
 			return Err(DecodeError::InvalidValue);
 		}
+		println!("A missing_req_type: {}", std::stringify!($field));
 	}};
 	($last_seen_type: expr, $type: expr, $field: ident, vec_type) => {{
 		// no-op
@@ -161,7 +163,9 @@ macro_rules! decode_tlv {
 		$field = Some(ser::Readable::read(&mut $reader)?);
 	}};
 	($reader: expr, $field: ident, ignorable) => {{
+		println!("B decode_tlv ignorable");
 		$field = ser::MaybeReadable::read(&mut $reader)?;
+		println!("A decode_tlv ignorable");
 	}};
 }
 
@@ -170,6 +174,7 @@ macro_rules! decode_tlv_stream {
 		use ln::msgs::DecodeError;
 		let mut last_seen_type: Option<u64> = None;
 		let mut stream_ref = $stream;
+		println!("S decode_tlv_stream!");
 		'tlv_read: loop {
 			use util::ser;
 
@@ -183,6 +188,7 @@ macro_rules! decode_tlv_stream {
 				match ser::Readable::read(&mut tracking_reader) {
 					Err(DecodeError::ShortRead) => {
 						if !tracking_reader.have_read {
+							println!("BREAKING");
 							break 'tlv_read;
 						} else {
 							return Err(DecodeError::ShortRead);
@@ -194,24 +200,30 @@ macro_rules! decode_tlv_stream {
 			};
 
 			// Types must be unique and monotonically increasing:
+			println!("B last_seen_type");	
 			match last_seen_type {
 				Some(t) if typ.0 <= t => {
 					return Err(DecodeError::InvalidValue);
 				},
 				_ => {},
 			}
+			println!("A last_seen_type");	
 			// As we read types, make sure we hit every required type:
+			println!("B check_tlv_order");	
 			$({
 				check_tlv_order!(last_seen_type, typ, $type, $field, $fieldty);
 			})*
 			last_seen_type = Some(typ.0);
+			println!("A check_tlv_order: {:?}", last_seen_type);	
 
 			// Finally, read the length and value itself:
 			let length: ser::BigSize = ser::Readable::read(&mut stream_ref)?;
 			let mut s = ser::FixedLengthReader::new(&mut stream_ref, length.0);
 			match typ.0 {
 				$($type => {
+					println!("B decode_tlv: {}", std::stringify!($field));	
 					decode_tlv!(s, $field, $fieldty);
+					println!("A decode_tlv: {}", std::stringify!($field));	
 					if s.bytes_remain() {
 						s.eat_remaining()?; // Return ShortRead if there's actually not enough bytes
 						return Err(DecodeError::InvalidValue);
@@ -225,9 +237,11 @@ macro_rules! decode_tlv_stream {
 			s.eat_remaining()?;
 		}
 		// Make sure we got to each required type after we've read every TLV:
+		println!("B check_missing_tlv");	
 		$({
 			check_missing_tlv!(last_seen_type, $type, $field, $fieldty);
 		})*
+		println!("A check_missing_tlv");	
 	} }
 }
 
@@ -332,8 +346,10 @@ macro_rules! read_ver_prefix {
 macro_rules! read_tlv_fields {
 	($stream: expr, {$(($type: expr, $field: ident, $fieldty: tt)),* $(,)*}) => { {
 		let tlv_len: ::util::ser::BigSize = ::util::ser::Readable::read($stream)?;
+		println!("B decode_tlv_stream! - tlv len: {}", tlv_len.0);
 		let mut rd = ::util::ser::FixedLengthReader::new($stream, tlv_len.0);
 		decode_tlv_stream!(&mut rd, {$(($type, $field, $fieldty)),*});
+		println!("A decode_tlv_stream!");
 		rd.eat_remaining().map_err(|_| ::ln::msgs::DecodeError::ShortRead)?;
 	} }
 }
