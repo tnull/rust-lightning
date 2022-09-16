@@ -127,6 +127,14 @@ impl KVStorePersister for FilesystemPersister {
 		dest_file.push(key);
 		util::write_to_file(dest_file, object)
 	}
+
+	fn get<R: Readable>(&self, key: &str) -> io::Result<R> {
+		unimplemented!();
+	}
+
+	fn list(&self) -> Vec<&str> {
+		unimplemented!();
+	}
 }
 
 #[cfg(test)]

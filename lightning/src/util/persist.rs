@@ -14,15 +14,21 @@ use io::{self};
 use routing::scoring::WriteableScore;
 
 use crate::{chain::{keysinterface::{Sign, KeysInterface}, self, transaction::{OutPoint}, chaininterface::{BroadcasterInterface, FeeEstimator}, chainmonitor::{Persist, MonitorUpdateId}, channelmonitor::{ChannelMonitor, ChannelMonitorUpdate}}, ln::channelmanager::ChannelManager, routing::gossip::NetworkGraph};
-use super::{logger::Logger, ser::Writeable};
+use super::{logger::Logger, ser::Writeable, ser::Readable};
 
 /// Trait for a key-value store for persisting some writeable object at some key
 /// Implementing `KVStorePersister` provides auto-implementations for [`Persister`]
 /// and [`Persist`] traits.  It uses "manager", "network_graph",
 /// and "monitors/{funding_txo_id}_{funding_txo_index}" for keys.
 pub trait KVStorePersister {
-	/// Persist the given writeable using the provided key
+	/// Persist the given writeable using the provided key.
 	fn persist<W: Writeable>(&self, key: &str, object: &W) -> io::Result<()>;
+
+	/// Retrieves the object persisted under the given key, if present.
+	fn get<R: Readable>(&self, key: &str) -> io::Result<R>;
+
+	/// Lists all persisted keys.
+	fn list(&self) -> Vec<&str>;
 }
 
 /// Trait that handles persisting a [`ChannelManager`], [`NetworkGraph`], and [`WriteableScore`] to disk.
