@@ -289,7 +289,7 @@ type ShutdownResult = (Option<(OutPoint, ChannelMonitorUpdate)>, Vec<(HTLCSource
 
 struct MsgHandleErrInternal {
 	err: msgs::LightningError,
-	chan_id: Option<([u8; 32], u64)>, // If Some a channel of ours has been closed
+	chan_id: Option<([u8; 32], u128)>, // If Some a channel of ours has been closed
 	shutdown_finish: Option<(ShutdownResult, Option<msgs::ChannelUpdate>)>,
 }
 impl MsgHandleErrInternal {
@@ -325,7 +325,7 @@ impl MsgHandleErrInternal {
 		Self { err, chan_id: None, shutdown_finish: None }
 	}
 	#[inline]
-	fn from_finish_shutdown(err: String, channel_id: [u8; 32], user_channel_id: u64, shutdown_res: ShutdownResult, channel_update: Option<msgs::ChannelUpdate>) -> Self {
+	fn from_finish_shutdown(err: String, channel_id: [u8; 32], user_channel_id: u128, shutdown_res: ShutdownResult, channel_update: Option<msgs::ChannelUpdate>) -> Self {
 		Self {
 			err: LightningError {
 				err: err.clone(),
@@ -1084,7 +1084,7 @@ pub struct ChannelDetails {
 	/// [`outbound_capacity_msat`]: ChannelDetails::outbound_capacity_msat
 	pub unspendable_punishment_reserve: Option<u64>,
 	/// The `user_channel_id` passed in to create_channel, or 0 if the channel was inbound.
-	pub user_channel_id: u64,
+	pub user_channel_id: u128,
 	/// Our total balance.  This is the amount we would get if we close the channel.
 	/// This value is not exact. Due to various in-flight changes and feerate changes, exactly this
 	/// amount is not likely to be recoverable on close.
@@ -1740,7 +1740,7 @@ impl<M: Deref, T: Deref, K: Deref, F: Deref, L: Deref> ChannelManager<M, T, K, F
 	/// [`Event::FundingGenerationReady::user_channel_id`]: events::Event::FundingGenerationReady::user_channel_id
 	/// [`Event::FundingGenerationReady::temporary_channel_id`]: events::Event::FundingGenerationReady::temporary_channel_id
 	/// [`Event::ChannelClosed::channel_id`]: events::Event::ChannelClosed::channel_id
-	pub fn create_channel(&self, their_network_key: PublicKey, channel_value_satoshis: u64, push_msat: u64, user_channel_id: u64, override_config: Option<UserConfig>) -> Result<[u8; 32], APIError> {
+	pub fn create_channel(&self, their_network_key: PublicKey, channel_value_satoshis: u64, push_msat: u64, user_channel_id: u128, override_config: Option<UserConfig>) -> Result<[u8; 32], APIError> {
 		if channel_value_satoshis < 1000 {
 			return Err(APIError::APIMisuseError { err: format!("Channel value must be at least 1000 satoshis. It was {}", channel_value_satoshis) });
 		}
@@ -4529,7 +4529,7 @@ impl<M: Deref, T: Deref, K: Deref, F: Deref, L: Deref> ChannelManager<M, T, K, F
 	///
 	/// [`Event::OpenChannelRequest`]: events::Event::OpenChannelRequest
 	/// [`Event::ChannelClosed::user_channel_id`]: events::Event::ChannelClosed::user_channel_id
-	pub fn accept_inbound_channel(&self, temporary_channel_id: &[u8; 32], counterparty_node_id: &PublicKey, user_channel_id: u64) -> Result<(), APIError> {
+	pub fn accept_inbound_channel(&self, temporary_channel_id: &[u8; 32], counterparty_node_id: &PublicKey, user_channel_id: u128) -> Result<(), APIError> {
 		self.do_accept_inbound_channel(temporary_channel_id, counterparty_node_id, false, user_channel_id)
 	}
 
@@ -4551,11 +4551,11 @@ impl<M: Deref, T: Deref, K: Deref, F: Deref, L: Deref> ChannelManager<M, T, K, F
 	///
 	/// [`Event::OpenChannelRequest`]: events::Event::OpenChannelRequest
 	/// [`Event::ChannelClosed::user_channel_id`]: events::Event::ChannelClosed::user_channel_id
-	pub fn accept_inbound_channel_from_trusted_peer_0conf(&self, temporary_channel_id: &[u8; 32], counterparty_node_id: &PublicKey, user_channel_id: u64) -> Result<(), APIError> {
+	pub fn accept_inbound_channel_from_trusted_peer_0conf(&self, temporary_channel_id: &[u8; 32], counterparty_node_id: &PublicKey, user_channel_id: u128) -> Result<(), APIError> {
 		self.do_accept_inbound_channel(temporary_channel_id, counterparty_node_id, true, user_channel_id)
 	}
 
-	fn do_accept_inbound_channel(&self, temporary_channel_id: &[u8; 32], counterparty_node_id: &PublicKey, accept_0conf: bool, user_channel_id: u64) -> Result<(), APIError> {
+	fn do_accept_inbound_channel(&self, temporary_channel_id: &[u8; 32], counterparty_node_id: &PublicKey, accept_0conf: bool, user_channel_id: u128) -> Result<(), APIError> {
 		let _persistence_guard = PersistenceNotifierGuard::notify_on_drop(&self.total_consistency_lock, &self.persistence_notifier);
 
 		let mut channel_state_lock = self.channel_state.lock().unwrap();
@@ -4603,9 +4603,9 @@ impl<M: Deref, T: Deref, K: Deref, F: Deref, L: Deref> ChannelManager<M, T, K, F
 			return Err(MsgHandleErrInternal::send_err_msg_no_close("No inbound channels accepted".to_owned(), msg.temporary_channel_id.clone()));
 		}
 
-		let mut random_bytes = [0u8; 8];
-		random_bytes.copy_from_slice(&self.keys_manager.get_secure_random_bytes()[..8]);
-		let user_channel_id = u64::from_be_bytes(random_bytes);
+		let mut random_bytes = [0u8; 16];
+		random_bytes.copy_from_slice(&self.keys_manager.get_secure_random_bytes()[..16]);
+		let user_channel_id = u128::from_be_bytes(random_bytes);
 
 		let outbound_scid_alias = self.create_and_insert_outbound_scid_alias();
 		let mut channel = match Channel::new_from_req(&self.fee_estimator, &self.keys_manager,
