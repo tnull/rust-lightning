@@ -6433,6 +6433,11 @@ impl_writeable_tlv_based!(ChannelDetails, {
 	(32, is_public, required),
 	(33, inbound_htlc_minimum_msat, option),
 	(35, inbound_htlc_maximum_msat, option),
+},
+|| { let res: Result<(), io::Error> = Ok(()); res },
+|typ, reader| {
+	let res: Result<bool, DecodeError> = Ok(true);
+	res
 });
 
 impl_writeable_tlv_based!(PhantomRouteHints, {

@@ -29,7 +29,7 @@ macro_rules! encode_tlv {
 }
 
 macro_rules! encode_tlv_stream {
-	($stream: expr, {$(($type: expr, $field: expr, $fieldty: tt)),* $(,)*}) => { {
+	($stream: expr, {$(($type: expr, $field: expr, $fieldty: tt)),* $(,)*} $(, $encode_custom_tlv: expr )?) => { {
 		#[allow(unused_imports)]
 		use $crate::{
 			ln::msgs::DecodeError,
@@ -40,6 +40,10 @@ macro_rules! encode_tlv_stream {
 		$(
 			encode_tlv!($stream, $type, $field, $fieldty);
 		)*
+
+		$(
+			$encode_custom_tlv().unwrap();
+		)?
 
 		#[allow(unused_mut, unused_variables, unused_assignments)]
 		#[cfg(debug_assertions)]
@@ -79,7 +83,7 @@ macro_rules! get_varint_length_prefixed_tlv_length {
 }
 
 macro_rules! encode_varint_length_prefixed_tlv {
-	($stream: expr, {$(($type: expr, $field: expr, $fieldty: tt)),*}) => { {
+	($stream: expr, {$(($type: expr, $field: expr, $fieldty: tt)),*} $(, $encode_custom_tlv: expr )?) => { {
 		use $crate::util::ser::BigSize;
 		let len = {
 			#[allow(unused_mut)]
@@ -90,7 +94,7 @@ macro_rules! encode_varint_length_prefixed_tlv {
 			len.0
 		};
 		BigSize(len as u64).write($stream)?;
-		encode_tlv_stream!($stream, { $(($type, $field, $fieldty)),* });
+		encode_tlv_stream!($stream, { $(($type, $field, $fieldty)),* } $(, $encode_custom_tlv )?);
 	} }
 }
 
@@ -332,8 +336,8 @@ macro_rules! write_ver_prefix {
 /// This is the preferred method of adding new fields that old nodes can ignore and still function
 /// correctly.
 macro_rules! write_tlv_fields {
-	($stream: expr, {$(($type: expr, $field: expr, $fieldty: tt)),* $(,)*}) => {
-		encode_varint_length_prefixed_tlv!($stream, {$(($type, $field, $fieldty)),*})
+	($stream: expr, {$(($type: expr, $field: expr, $fieldty: tt)),* $(,)*} $(, $encode_custom_tlv: expr )?) => {
+		encode_varint_length_prefixed_tlv!($stream, {$(($type, $field, $fieldty)),*} $(, $encode_custom_tlv )?)
 	}
 }
 
@@ -353,10 +357,10 @@ macro_rules! read_ver_prefix {
 
 /// Reads a suffix added by write_tlv_fields.
 macro_rules! read_tlv_fields {
-	($stream: expr, {$(($type: expr, $field: ident, $fieldty: tt)),* $(,)*}) => { {
+	($stream: expr, {$(($type: expr, $field: ident, $fieldty: tt)),* $(,)*} $(, $decode_custom_tlv: expr )?) => { {
 		let tlv_len: $crate::util::ser::BigSize = $crate::util::ser::Readable::read($stream)?;
 		let mut rd = $crate::util::ser::FixedLengthReader::new($stream, tlv_len.0);
-		decode_tlv_stream!(&mut rd, {$(($type, $field, $fieldty)),*});
+		decode_tlv_stream!(&mut rd, {$(($type, $field, $fieldty)),*} $(, $decode_custom_tlv )?);
 		rd.eat_remaining().map_err(|_| $crate::ln::msgs::DecodeError::ShortRead)?;
 	} }
 }
@@ -397,12 +401,12 @@ macro_rules! init_tlv_field_var {
 /// if $fieldty is `vec_type`, then $field is a Vec, which needs to have its individual elements
 /// serialized.
 macro_rules! impl_writeable_tlv_based {
-	($st: ident, {$(($type: expr, $field: ident, $fieldty: tt)),* $(,)*}) => {
+	($st: ident, {$(($type: expr, $field: ident, $fieldty: tt)),* $(,)*} $(, $encode_custom_tlv: expr, $decode_custom_tlv: expr )? ) => {
 		impl $crate::util::ser::Writeable for $st {
 			fn write<W: $crate::util::ser::Writer>(&self, writer: &mut W) -> Result<(), $crate::io::Error> {
 				write_tlv_fields!(writer, {
 					$(($type, self.$field, $fieldty)),*
-				});
+				}$(, $encode_custom_tlv )?);
 				Ok(())
 			}
 
@@ -430,7 +434,7 @@ macro_rules! impl_writeable_tlv_based {
 				)*
 				read_tlv_fields!(reader, {
 					$(($type, $field, $fieldty)),*
-				});
+				} $(, $decode_custom_tlv )?);
 				Ok(Self {
 					$(
 						$field: init_tlv_based_struct_field!($field, $fieldty)

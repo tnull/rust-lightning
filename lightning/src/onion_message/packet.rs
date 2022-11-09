@@ -212,7 +212,8 @@ impl<H: CustomOnionMessageHandler> ReadableArgs<(SharedSecret, &H)> for Payload<
 		decode_tlv_stream!(&mut rd, {
 			(2, reply_path, option),
 			(4, read_adapter, (option: LengthReadableArgs, rho)),
-		}, |msg_type, msg_reader| {
+		},
+		|msg_type, msg_reader| {
 			if msg_type < 64 { return Ok(false) }
 			// Don't allow reading more than one data TLV from an onion message.
 			if message_type.is_some() { return Err(DecodeError::InvalidValue) }
