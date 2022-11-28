@@ -1948,7 +1948,7 @@ impl<Signer: Sign> Channel<Signer> {
 	/// before we fail backwards.
 	///
 	/// If we do fail twice, we debug_assert!(false) and return Ok(()). Thus, will always return
-	/// Ok(()) if debug assertions are turned on or preconditions are met.
+	/// Ok(()) if preconditions are met.
 	pub fn queue_fail_htlc<L: Deref>(&mut self, htlc_id_arg: u64, err_packet: msgs::OnionErrorPacket, logger: &L)
 	-> Result<(), ChannelError> where L::Target: Logger {
 		self.fail_htlc(htlc_id_arg, err_packet, true, logger)
@@ -1959,8 +1959,9 @@ impl<Signer: Sign> Channel<Signer> {
 	/// an HTLC more than once or fulfill once and then attempt to fail after reconnect. We cannot,
 	/// however, fail more than once as we wait for an upstream failure to be irrevocably committed
 	/// before we fail backwards.
+	///
 	/// If we do fail twice, we debug_assert!(false) and return Ok(None). Thus, will always return
-	/// Ok(_) if debug assertions are turned on or preconditions are met.
+	/// Ok(_) if preconditions are met.
 	fn fail_htlc<L: Deref>(&mut self, htlc_id_arg: u64, err_packet: msgs::OnionErrorPacket, mut force_holding_cell: bool, logger: &L)
 	-> Result<Option<msgs::UpdateFailHTLC>, ChannelError> where L::Target: Logger {
 		if (self.channel_state & (ChannelState::ChannelReady as u32)) != (ChannelState::ChannelReady as u32) {
