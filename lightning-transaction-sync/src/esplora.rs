@@ -141,7 +141,7 @@ where
 		let last_sync_hash = Mutex::new(None);
 		#[cfg(feature = "async-interface")]
 		let last_sync_hash = tokio::sync::Mutex::new(None);
-		let builder = Builder::new(&format!("http://{}", server_url));
+		let builder = Builder::new(&server_url);
 		#[cfg(not(feature = "async-interface"))]
 		let client = builder.build_blocking().unwrap();
 		#[cfg(feature = "async-interface")]
