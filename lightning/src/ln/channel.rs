@@ -3552,8 +3552,8 @@ impl<Signer: Sign> Channel<Signer> {
 	}
 
 	/// Queues up an outbound update fee by placing it in the holding cell. You should call
-	/// `maybe_free_holding_cell_htlcs` in order to actually generate and send the commitment
-	/// update.
+	/// [`Self::maybe_free_holding_cell_htlcs`] in order to actually generate and send the
+	/// commitment update.
 	pub fn queue_update_fee<L: Deref>(&mut self, feerate_per_kw: u32, logger: &L) where L::Target: Logger {
 		let msg_opt = self.send_update_fee(feerate_per_kw, true, logger);
 		assert!(msg_opt.is_none(), "We forced holding cell?");
@@ -3564,8 +3564,8 @@ impl<Signer: Sign> Channel<Signer> {
 	/// If our balance is too low to cover the cost of the next commitment transaction at the
 	/// new feerate, the update is cancelled.
 	///
-	/// You MUST call `send_commitment_no_state_update` prior to any other calls on this Channel if
-	/// `force_holding_cell` is false.
+	/// You MUST call [`Self::send_commitment_no_state_update`] prior to any other calls on this
+	/// [`Channel`] if `force_holding_cell` is false.
 	fn send_update_fee<L: Deref>(&mut self, feerate_per_kw: u32, mut force_holding_cell: bool, logger: &L) -> Option<msgs::UpdateFee> where L::Target: Logger {
 		if !self.is_outbound() {
 			panic!("Cannot send fee from inbound channel");
