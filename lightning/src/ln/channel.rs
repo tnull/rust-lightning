@@ -1947,8 +1947,9 @@ impl<Signer: Sign> Channel<Signer> {
 	/// however, fail more than once as we wait for an upstream failure to be irrevocably committed
 	/// before we fail backwards.
 	///
-	/// If we do fail twice, we debug_assert!(false) and return Ok(()). Thus, will always return
-	/// Ok(()) if preconditions are met.
+	/// If we do fail twice, we `debug_assert!(false)` and return `Ok(None)`. Thus, this will always
+	/// return `Ok(_)` if preconditions are met. In any case, `Err`s will only be
+	/// [`ChannelError::Ignore`].
 	pub fn queue_fail_htlc<L: Deref>(&mut self, htlc_id_arg: u64, err_packet: msgs::OnionErrorPacket, logger: &L)
 	-> Result<(), ChannelError> where L::Target: Logger {
 		self.fail_htlc(htlc_id_arg, err_packet, true, logger)
