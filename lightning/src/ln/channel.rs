@@ -2004,7 +2004,7 @@ impl<Signer: Sign> Channel<Signer> {
 		}
 
 		if (self.channel_state & (ChannelState::AwaitingRemoteRevoke as u32 | ChannelState::PeerDisconnected as u32 | ChannelState::MonitorUpdateInProgress as u32)) != 0 {
-			debug_assert!(force_holding_cell, "We don't expect to need to use the holding cell if we weren't trying to");
+			debug_assert!(force_holding_cell, "!force_holding_cell is only called when emptying the holding cell, so we shouldn't end up back in it!");
 			force_holding_cell = true;
 		}
 
