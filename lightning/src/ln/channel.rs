@@ -5490,10 +5490,10 @@ impl<Signer: Sign> Channel<Signer> {
 	// Send stuff to our remote peers:
 
 	/// Queues up an outbound HTLC to send by placing it in the holding cell. You should call
-	/// `maybe_free_holding_cell_htlcs` in order to actually generate and send the commitment
-	/// update.
+	/// [`Self::maybe_free_holding_cell_htlcs`] in order to actually generate and send the
+	/// commitment update.
 	///
-	/// If an Err is returned, it's a ChannelError::Ignore!
+	/// `Err`s will only be [`ChannelError::Ignore`].
 	pub fn queue_htlc<L: Deref>(&mut self, amount_msat: u64, payment_hash: PaymentHash, cltv_expiry: u32, source: HTLCSource,
 		onion_routing_packet: msgs::OnionPacket, logger: &L)
 	-> Result<(), ChannelError> where L::Target: Logger {
