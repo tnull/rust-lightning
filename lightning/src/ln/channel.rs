@@ -5517,10 +5517,10 @@ impl<Signer: Sign> Channel<Signer> {
 	///   we may not yet have sent the previous commitment update messages and will need to
 	///   regenerate them.
 	///
-	/// You MUST call `send_commitment_no_state_update` prior to calling any other methods on this
-	/// Channel if `force_holding_cell` is false.
+	/// You MUST call [`Self::send_commitment_no_state_update`] prior to calling any other methods
+	/// on this [`Channel]` if `force_holding_cell` is false.
 	///
-	/// If an Err is returned, it's a ChannelError::Ignore!
+	/// `Err`s will only be [`ChannelError::Ignore`].
 	fn send_htlc<L: Deref>(&mut self, amount_msat: u64, payment_hash: PaymentHash, cltv_expiry: u32, source: HTLCSource,
 		onion_routing_packet: msgs::OnionPacket, mut force_holding_cell: bool, logger: &L)
 	-> Result<Option<msgs::UpdateAddHTLC>, ChannelError> where L::Target: Logger {
@@ -5779,8 +5779,8 @@ impl<Signer: Sign> Channel<Signer> {
 	/// Adds a pending outbound HTLC to this channel, and creates a signed commitment transaction
 	/// to send to the remote peer in one go.
 	///
-	/// Shorthand for calling send_htlc() followed by a commitment update, see docs on `send_htlc`
-	/// and `send_commitment_no_state_update` for more info.
+	/// Shorthand for calling [`Self::send_htlc`] followed by a commitment update, see docs on
+	/// [`Self::send_htlc`] and [`Self::send_commitment_no_state_update`] for more info.
 	pub fn send_htlc_and_commit<L: Deref>(&mut self, amount_msat: u64, payment_hash: PaymentHash, cltv_expiry: u32, source: HTLCSource, onion_routing_packet: msgs::OnionPacket, logger: &L) -> Result<Option<(msgs::UpdateAddHTLC, msgs::CommitmentSigned, ChannelMonitorUpdate)>, ChannelError> where L::Target: Logger {
 		match self.send_htlc(amount_msat, payment_hash, cltv_expiry, source, onion_routing_packet, false, logger)? {
 			Some(update_add_htlc) => {
