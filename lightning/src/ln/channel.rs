@@ -5494,12 +5494,11 @@ impl<Signer: Sign> Channel<Signer> {
 	/// commitment update.
 	///
 	/// `Err`s will only be [`ChannelError::Ignore`].
-	pub fn queue_htlc<L: Deref>(&mut self, amount_msat: u64, payment_hash: PaymentHash, cltv_expiry: u32, source: HTLCSource,
+	pub fn queue_add_htlc<L: Deref>(&mut self, amount_msat: u64, payment_hash: PaymentHash, cltv_expiry: u32, source: HTLCSource,
 		onion_routing_packet: msgs::OnionPacket, logger: &L)
 	-> Result<(), ChannelError> where L::Target: Logger {
 		self.send_htlc(amount_msat, payment_hash, cltv_expiry, source, onion_routing_packet, true, logger)
 			.map(|msg_opt| assert!(msg_opt.is_none(), "We forced holding cell?"))
-
 	}
 
 	/// Adds a pending outbound HTLC to this channel, note that you probably want
