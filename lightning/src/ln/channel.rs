@@ -5504,11 +5504,17 @@ impl<Signer: Sign> Channel<Signer> {
 	pub fn queue_add_htlc<L: Deref>(&mut self, amount_msat: u64, payment_hash: PaymentHash, cltv_expiry: u32, source: HTLCSource,
 		onion_routing_packet: msgs::OnionPacket, logger: &L)
 	-> Result<(), ChannelError> where L::Target: Logger {
-		let res = self
-			.send_htlc(amount_msat, payment_hash, cltv_expiry, source, onion_routing_packet, true, logger)
-			.map(|msg_opt| assert!(msg_opt.is_none(), "We forced holding cell?"));
-		if let Err(e) = &res { if let ChannelError::Ignore(_) = e {} else { debug_assert!(false, "Queueing cannot trigger channel failure"); } }
-		res
+		match self.send_htlc(amount_msat, payment_hash, cltv_expiry, source, onion_routing_packet, true, logger) {
+			Ok(msg_opt) => {
+				assert!(msg_opt.is_none(), "We forced holding cell?");
+				Ok(())
+			},
+			Err(e@ChannelError::Ignore(_)) => Err(e),
+			Err(e) => {
+				debug_assert!(false, "Queueing cannot trigger channel failure");
+				Err(e)
+			}
+		}
 	}
 
 	/// Adds a pending outbound HTLC to this channel, note that you probably want
