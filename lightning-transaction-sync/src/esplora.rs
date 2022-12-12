@@ -98,7 +98,7 @@ where
 				}
 
 				match maybe_await!(self.get_confirmed_transactions()) {
-					Ok((confirmed_txs, unconfirmed_registered_txs, unspent_registered_outputs)) => {
+					Ok((confirmed_txs, spent_outputs)) => {
 						// Double-check tip hash. If something changed, restart last-minute.
 						let check_tip_hash = maybe_await!(self.client.get_tip_hash())?;
 						if check_tip_hash != tip_hash {
@@ -109,8 +109,7 @@ where
 						self.sync_confirmed_transactions(
 							&confirmables,
 							confirmed_txs,
-							unconfirmed_registered_txs,
-							unspent_registered_outputs,
+							spent_outputs,
 						);
 					}
 					Err(TxSyncError::Inconsistency) => {
@@ -206,9 +205,9 @@ where
 
 	fn sync_confirmed_transactions(
 		&self, confirmables: &Vec<&(dyn Confirm + Sync + Send)>, confirmed_txs: Vec<ConfirmedTx>,
-		unconfirmed_registered_txs: HashSet<Txid>,
-		unspent_registered_outputs: HashSet<WatchedOutput>,
+		spent_outputs: HashSet<WatchedOutput>,
 	) {
+		let mut locked_watched_transactions = self.watched_transactions.lock().unwrap();
 		for ctx in confirmed_txs {
 			for c in confirmables {
 				c.transactions_confirmed(
@@ -217,16 +216,18 @@ where
 					ctx.block_height,
 				);
 			}
+
+			locked_watched_transactions.remove(&ctx.tx.txid());
 		}
 
-		*self.watched_transactions.lock().unwrap() = unconfirmed_registered_txs;
-		*self.watched_outputs.lock().unwrap() = unspent_registered_outputs;
+		let mut locked_watched_outputs = self.watched_outputs.lock().unwrap();
+		*locked_watched_outputs = &*locked_watched_outputs - &spent_outputs;
 	}
 
 	#[maybe_async]
 	fn get_confirmed_transactions(
 		&self,
-	) -> Result<(Vec<ConfirmedTx>, HashSet<Txid>, HashSet<WatchedOutput>), TxSyncError> {
+	) -> Result<(Vec<ConfirmedTx>, HashSet<WatchedOutput>), TxSyncError> {
 
 		// First, check the confirmation status of registered transactions as well as the
 		// status of dependent transactions of registered outputs.
@@ -237,22 +238,17 @@ where
 		// previous iterations.
 		let registered_txs = self.watched_transactions.lock().unwrap().clone();
 
-		// Remember all registered but unconfirmed transactions for future processing.
-		let mut unconfirmed_registered_txs = HashSet::new();
-
 		for txid in registered_txs {
 			if let Some(confirmed_tx) = maybe_await!(self.get_confirmed_tx(&txid, None, None))? {
 				confirmed_txs.push(confirmed_tx);
-			} else {
-				unconfirmed_registered_txs.insert(txid);
 			}
 		}
 
 		// Check all registered outputs for dependent spending transactions.
 		let registered_outputs = self.watched_outputs.lock().unwrap().clone();
 
-		// Remember all registered outputs that haven't been spent for future processing.
-		let mut unspent_registered_outputs = HashSet::new();
+		// Remember all registered outputs that have been spent.
+		let mut spent_outputs = HashSet::new();
 
 		for output in registered_outputs {
 			if let Some(output_status) = maybe_await!(self.client
@@ -268,12 +264,12 @@ where
 							))?
 						{
 							confirmed_txs.push(confirmed_tx);
+							spent_outputs.insert(output);
 							continue;
 						}
 					}
 				}
 			}
-			unspent_registered_outputs.insert(output);
 		}
 
 		// Sort all confirmed transactions first by block height, then by in-block
@@ -282,7 +278,7 @@ where
 			tx1.block_height.cmp(&tx2.block_height).then_with(|| tx1.pos.cmp(&tx2.pos))
 		});
 
-		Ok((confirmed_txs, unconfirmed_registered_txs, unspent_registered_outputs))
+		Ok((confirmed_txs, spent_outputs))
 	}
 
 	#[maybe_async]
@@ -336,7 +332,6 @@ where
 			.flat_map(|c| c.get_relevant_txids())
 			.collect::<HashSet<(Txid, Option<BlockHash>)>>();
 
-		let mut locked_watched_transactions = self.watched_transactions.lock().unwrap();
 		for (txid, block_hash_opt) in relevant_txids {
 			if let Some(block_hash) = block_hash_opt {
 				let block_status = maybe_await!(self.client.get_block_status(&block_hash))?;
@@ -350,7 +345,7 @@ where
 				c.transaction_unconfirmed(&txid);
 			}
 
-			locked_watched_transactions.insert(txid);
+			self.watched_transactions.lock().unwrap().insert(txid);
 		}
 
 		Ok(())
