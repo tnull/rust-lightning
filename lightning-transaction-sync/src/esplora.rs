@@ -41,7 +41,7 @@ where
 	#[cfg(not(feature = "async-interface"))]
 	last_sync_hash: std::sync::Mutex<Option<BlockHash>>,
 	#[cfg(feature = "async-interface")]
-	last_sync_hash: tokio::sync::Mutex<Option<BlockHash>>,
+	last_sync_hash: futures::lock::Mutex<Option<BlockHash>>,
 	#[cfg(not(feature = "async-interface"))]
 	client: BlockingClient,
 	#[cfg(feature = "async-interface")]
@@ -139,7 +139,7 @@ where
 		#[cfg(not(feature = "async-interface"))]
 		let last_sync_hash = Mutex::new(None);
 		#[cfg(feature = "async-interface")]
-		let last_sync_hash = tokio::sync::Mutex::new(None);
+		let last_sync_hash = futures::lock::Mutex::new(None);
 		let builder = Builder::new(&server_url);
 		#[cfg(not(feature = "async-interface"))]
 		let client = builder.build_blocking().unwrap();
