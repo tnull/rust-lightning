@@ -1,4 +1,4 @@
-use crate::TxSyncError;
+use crate::error::{TxSyncError, InternalError};
 
 use lightning::util::logger::Logger;
 use lightning::{log_error, log_given_level, log_info, log_internal, log_debug, log_trace};
@@ -88,13 +88,13 @@ where
 							// (Semi-)permanent failure, retry later.
 							log_error!(self.logger, "Failed during transaction sync, aborting.");
 							self.pending_sync.store(true, Ordering::SeqCst);
-							return Err(err);
+							return Err(TxSyncError::from(err));
 						}
 					}
 
 					match maybe_await!(self.sync_best_block_updated(&confirmables, &tip_hash)) {
 						Ok(()) => {}
-						Err(TxSyncError::Inconsistency) => {
+						Err(InternalError::Inconsistency) => {
 							// Immediately restart syncing when we encounter any inconsistencies.
 							log_debug!(self.logger, "Encountered inconsistency during transaction sync, restarting.");
 							self.pending_sync.store(true, Ordering::SeqCst);
@@ -103,7 +103,7 @@ where
 						Err(err) => {
 							// (Semi-)permanent failure, retry later.
 							self.pending_sync.store(true, Ordering::SeqCst);
-							return Err(err);
+							return Err(TxSyncError::from(err));
 						}
 					}
 				}
@@ -124,7 +124,7 @@ where
 							spent_outputs,
 						);
 					}
-					Err(TxSyncError::Inconsistency) => {
+					Err(InternalError::Inconsistency) => {
 						// Immediately restart syncing when we encounter any inconsistencies.
 						log_debug!(self.logger, "Encountered inconsistency during transaction sync, restarting.");
 						self.pending_sync.store(true, Ordering::SeqCst);
@@ -134,7 +134,7 @@ where
 						// (Semi-)permanent failure, retry later.
 						log_error!(self.logger, "Failed during transaction sync, aborting.");
 						self.pending_sync.store(true, Ordering::SeqCst);
-						return Err(err);
+						return Err(TxSyncError::from(err));
 					}
 				}
 				*locked_last_sync_hash = Some(tip_hash);
@@ -209,7 +209,7 @@ where
 	#[maybe_async]
 	fn sync_best_block_updated(
 		&self, confirmables: &Vec<&(dyn Confirm + Sync + Send)>, tip_hash: &BlockHash,
-	) -> Result<(), TxSyncError> {
+	) -> Result<(), InternalError> {
 
 		// Inform the interface of the new block.
 		let tip_header = maybe_await!(self.client.get_header_by_hash(tip_hash))?;
@@ -221,7 +221,7 @@ where
 				}
 			}
 		} else {
-			return Err(TxSyncError::Inconsistency);
+			return Err(InternalError::Inconsistency);
 		}
 		Ok(())
 	}
@@ -250,7 +250,7 @@ where
 	#[maybe_async]
 	fn get_confirmed_transactions(
 		&self,
-	) -> Result<(Vec<ConfirmedTx>, HashSet<WatchedOutput>), TxSyncError> {
+	) -> Result<(Vec<ConfirmedTx>, HashSet<WatchedOutput>), InternalError> {
 
 		// First, check the confirmation status of registered transactions as well as the
 		// status of dependent transactions of registered outputs.
@@ -307,14 +307,14 @@ where
 	#[maybe_async]
 	fn get_confirmed_tx(
 		&self, txid: &Txid, expected_block_hash: Option<BlockHash>, known_block_height: Option<u32>,
-	) -> Result<Option<ConfirmedTx>, TxSyncError> {
+	) -> Result<Option<ConfirmedTx>, InternalError> {
 		if let Some(merkle_block) = maybe_await!(self.client.get_merkle_block(&txid))? {
 			let block_header = merkle_block.header;
 			let block_hash = block_header.block_hash();
 			if let Some(expected_block_hash) = expected_block_hash {
 				if expected_block_hash != block_hash {
 					log_trace!(self.logger, "Inconsistency: Tx {} expected in block {}, but is confirmed in {}", txid, expected_block_hash, block_hash);
-					return Err(TxSyncError::Inconsistency);
+					return Err(InternalError::Inconsistency);
 				}
 			}
 
@@ -322,7 +322,7 @@ where
 			let mut indexes = Vec::new();
 			let _ = merkle_block.txn.extract_matches(&mut matches, &mut indexes);
 			debug_assert_eq!(indexes.len(), 1);
-			let pos = *indexes.get(0).ok_or(TxSyncError::Failed)? as usize;
+			let pos = *indexes.get(0).ok_or(InternalError::Failed)? as usize;
 			if let Some(tx) = maybe_await!(self.client.get_tx(&txid))? {
 				if let Some(block_height) = known_block_height {
 					// We can take a shortcut here if a previous call already gave us the height.
@@ -336,7 +336,7 @@ where
 					// If any previously-confirmed block suddenly is no longer confirmed, we found
 					// an inconsistency and should start over.
 					log_trace!(self.logger, "Inconsistency: Tx {} was unconfirmed during syncing.", txid);
-					return Err(TxSyncError::Inconsistency);
+					return Err(InternalError::Inconsistency);
 				}
 			}
 		}
@@ -346,7 +346,7 @@ where
 	#[maybe_async]
 	fn sync_unconfirmed_transactions(
 		&self, confirmables: &Vec<&(dyn Confirm + Sync + Send)>,
-	) -> Result<(), TxSyncError> {
+	) -> Result<(), InternalError> {
 		// Query the interface for relevant txids and check whether the relevant blocks are still
 		// in the best chain, mark them unconfirmed otherwise. If the transactions have been
 		// reconfirmed in another block, we'll confirm them in the next sync iteration.

@@ -17,8 +17,11 @@ extern crate bdk_macros;
 
 #[cfg(any(feature = "esplora-blocking", feature = "esplora-async"))]
 mod esplora;
-mod error;
 
+#[cfg(test)]
+mod tests;
+
+mod error;
 pub use error::TxSyncError;
 
 #[cfg(any(feature = "esplora-blocking", feature = "esplora-async"))]
