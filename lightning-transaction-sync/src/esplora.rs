@@ -32,11 +32,13 @@ where
 {
 	// Transactions that were registered via the `Filter` interface and have to be processed.
 	queued_transactions: Mutex<HashSet<Txid>>,
-	// Transactions that were previously processed, but must not be forgotten yet.
+	// Transactions that were previously processed, but must not be forgotten
+	// yet since they still need to be monitored for confirmation on-chain.
 	watched_transactions: Mutex<HashSet<Txid>>,
 	// Outputs that were registered via the `Filter` interface and have to be processed.
 	queued_outputs: Mutex<HashSet<WatchedOutput>>,
-	// Outputs that were previously processed, but must not be forgotten yet.
+	// Outputs that were previously processed, but must not be forgotten yet as
+	// as we still need to monitor any spends on-chain.
 	watched_outputs: Mutex<HashSet<WatchedOutput>>,
 	// Indicates whether we need to resync, e.g., after encountering an error.
 	pending_sync: AtomicBool,
