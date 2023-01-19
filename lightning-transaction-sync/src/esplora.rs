@@ -18,8 +18,9 @@ use core::ops::Deref;
 
 /// Synchronizes LDK with a given [`Esplora`] server.
 ///
-/// Needs to be registerd with a [`ChainMonitor`] via the [`Filter`] interface to be informed of
-/// transactions and outputs to montor.
+/// Needs to be registered with a [`ChainMonitor`] via the [`Filter`] interface to be informed of
+/// transactions and outputs to monitor for on-chain confirmation, unconfirmation, and
+/// reconfirmation.
 ///
 /// [`Esplora`]: https://github.com/Blockstream/electrs
 /// [`ChainMonitor`]: lightning::chain::chainmonitor::ChainMonitor
@@ -49,7 +50,7 @@ where
 		EsploraSyncClient::from_client(client, logger)
 	}
 
-	/// Returns a new [`EsploraSyncClient`] object using the given esplora client.
+	/// Returns a new [`EsploraSyncClient`] object using the given Esplora client.
 	pub fn from_client(client: EsploraClientType, logger: L) -> Self {
 		let sync_state = MutexType::new(SyncState::new());
 		let queue = std::sync::Mutex::new(FilterQueue::new());
@@ -61,10 +62,17 @@ where
 		}
 	}
 
-	/// Synchronizes the given confirmables via the [`Confirm`] interface. This method should be
-	/// called regularly to keep LDK up-to-date with current chain data.
+	/// Synchronizes the given `confirmables` via their [`Confirm`] interface implementations. This
+	/// method should be called regularly to keep LDK up-to-date with current chain data.
+	///
+	/// For example, instances of [`ChannelManager`] and [`ChainMonitor`] can be informed about the
+	/// newest on-chain activity related to the items previously registered via the [`Filter`]
+	/// interface.
 	///
 	/// [`Confirm`]: lightning::chain::Confirm
+	/// [`ChainMonitor`]: lightning::chain::chainmonitor::ChainMonitor
+	/// [`ChannelManager`]: lightning::ln::channelmanager::ChannelManager
+	/// [`Filter`]: lightning::chain::Filter
 	#[maybe_async]
 	pub fn sync(&self, confirmables: Vec<&(dyn Confirm + Sync + Send)>) -> Result<(), TxSyncError> {
 		// This lock makes sure we're syncing once at a time.
