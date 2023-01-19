@@ -1,3 +1,4 @@
+#[cfg(any(feature = "esplora-blocking", feature = "esplora-async"))]
 use crate::esplora::EsploraSyncClient;
 use lightning::chain::{Confirm, Filter};
 use lightning::chain::transaction::TransactionData;
@@ -150,10 +151,15 @@ impl Confirm for TestConfirmable {
 pub struct TestLogger {}
 
 impl Logger for TestLogger {
-	fn log(&self, _record: &Record) {}
+	fn log(&self, record: &Record) {
+		println!("{} -- {}",
+				record.level,
+				record.args);
+	}
 }
 
 #[test]
+#[cfg(feature = "esplora-blocking")]
 fn test_esplora_syncs() {
 	premine();
 	let mut logger = TestLogger {};
@@ -208,6 +214,91 @@ fn test_esplora_syncs() {
 	generate_blocks_and_wait(1);
 	assert_ne!(get_bitcoind().client.get_best_block_hash().unwrap(), best_block_hash);
 	tx_sync.sync(vec![&confirmable]).unwrap();
+
+	// Transaction still confirmed but under new tip.
+	assert!(confirmable.confirmed_txs.lock().unwrap().contains_key(&txid));
+	assert!(confirmable.unconfirmed_txs.lock().unwrap().is_empty());
+
+	// Check we got unconfirmed, then reconfirmed in the meantime.
+	let events = std::mem::take(&mut *confirmable.events.lock().unwrap());
+	assert_eq!(events.len(), 3);
+
+	match events[0] {
+		TestConfirmableEvent::Unconfirmed(t) => {
+			assert_eq!(t, txid);
+		},
+		_ => panic!("Unexpected event"),
+	}
+
+	match events[1] {
+		TestConfirmableEvent::BestBlockUpdated(..) => {},
+		_ => panic!("Unexpected event"),
+	}
+
+	match events[2] {
+		TestConfirmableEvent::Confirmed(t, _, _) => {
+			assert_eq!(t, txid);
+		},
+		_ => panic!("Unexpected event"),
+	}
+}
+
+#[tokio::test]
+#[cfg(feature = "esplora-async")]
+async fn test_esplora_syncs() {
+	premine();
+	let mut logger = TestLogger {};
+	let esplora_url = format!("http://{}", get_electrsd().esplora_url.as_ref().unwrap());
+	let tx_sync = EsploraSyncClient::new(esplora_url, &mut logger);
+	let confirmable = TestConfirmable::new();
+
+	// Check we pick up on new best blocks
+	let expected_height = 0u32;
+	assert_eq!(confirmable.best_block.lock().unwrap().1, expected_height);
+
+	tx_sync.sync(vec![&confirmable]).await.unwrap();
+
+	let expected_height = get_bitcoind().client.get_block_count().unwrap() as u32;
+	assert_eq!(confirmable.best_block.lock().unwrap().1, expected_height);
+
+	let events = std::mem::take(&mut *confirmable.events.lock().unwrap());
+	assert_eq!(events.len(), 1);
+
+	// Check registered confirmed transactions are marked confirmed
+	let new_address = get_bitcoind().client.get_new_address(Some("test"), Some(AddressType::Legacy)).unwrap();
+	let txid = get_bitcoind().client.send_to_address(&new_address, Amount::from_sat(5000), None, None, None, None, None, None).unwrap();
+	tx_sync.register_tx(&txid, &new_address.script_pubkey());
+
+	tx_sync.sync(vec![&confirmable]).await.unwrap();
+
+	let events = std::mem::take(&mut *confirmable.events.lock().unwrap());
+	assert_eq!(events.len(), 0);
+	assert!(confirmable.confirmed_txs.lock().unwrap().is_empty());
+	assert!(confirmable.unconfirmed_txs.lock().unwrap().is_empty());
+
+	generate_blocks_and_wait(1);
+	tx_sync.sync(vec![&confirmable]).await.unwrap();
+
+	let events = std::mem::take(&mut *confirmable.events.lock().unwrap());
+	assert_eq!(events.len(), 2);
+	assert!(confirmable.confirmed_txs.lock().unwrap().contains_key(&txid));
+	assert!(confirmable.unconfirmed_txs.lock().unwrap().is_empty());
+
+	// Check previously confirmed transactions are marked unconfirmed when they are reorged.
+	let best_block_hash = get_bitcoind().client.get_best_block_hash().unwrap();
+	get_bitcoind().client.invalidate_block(&best_block_hash).unwrap();
+
+	// We're getting back to the previous height with a new tip, but best block shouldn't change.
+	generate_blocks_and_wait(1);
+	assert_ne!(get_bitcoind().client.get_best_block_hash().unwrap(), best_block_hash);
+	tx_sync.sync(vec![&confirmable]).await.unwrap();
+	let events = std::mem::take(&mut *confirmable.events.lock().unwrap());
+	assert_eq!(events.len(), 0);
+
+	// Now we're surpassing previous height, getting new tip.
+	generate_blocks_and_wait(1);
+	assert_ne!(get_bitcoind().client.get_best_block_hash().unwrap(), best_block_hash);
+	tx_sync.sync(vec![&confirmable]).await.unwrap();
 
 	// Transaction still confirmed but under new tip.
 	assert!(confirmable.confirmed_txs.lock().unwrap().contains_key(&txid));
