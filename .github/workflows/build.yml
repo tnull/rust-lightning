@@ -130,7 +130,7 @@ jobs:
           RUSTFLAGS="-C link-dead-code" cargo build --verbose --color always --features esplora-blocking
           RUSTFLAGS="-C link-dead-code" cargo build --verbose --color always --features esplora-async
       - name: Test transaction sync clients on Rust ${{ matrix.toolchain }} with features
-        if: "matrix.build-tx-sync && !matrix.coverage"
+        if: "matrix.build-tx-sync"
         run: |
           cd lightning-transaction-sync
           cargo test --verbose --color always --features esplora-blocking
