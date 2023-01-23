@@ -71,7 +71,7 @@ mod esplora;
 #[cfg(any(feature = "esplora-blocking", feature = "esplora-async"))]
 mod types;
 
-#[cfg(test)]
+#[cfg(all(test, any(esplora_async, esplora_blocking)))]
 mod tests;
 
 mod error;
