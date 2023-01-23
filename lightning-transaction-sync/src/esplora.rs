@@ -376,15 +376,13 @@ impl FilterQueue {
 		if !self.transactions.is_empty() {
 			pending_registrations = true;
 
-			sync_state.watched_transactions.extend(self.transactions.iter());
-			self.transactions = HashSet::new();
+			sync_state.watched_transactions.extend(self.transactions.drain());
 		}
 
 		if !self.outputs.is_empty() {
 			pending_registrations = true;
 
-			sync_state.watched_outputs.extend(self.outputs.iter().cloned());
-			self.outputs = HashSet::new();
+			sync_state.watched_outputs.extend(self.outputs.drain());
 		}
 		pending_registrations
 	}
