@@ -368,8 +368,9 @@ impl FilterQueue {
 		}
 	}
 
-	// Processes the transaction and output queues, returns `true` if new items had been
-	// registered.
+	// Processes the transaction and output queues and adds them to the given [`SyncState`].
+	//
+	// Returns `true` if new items had been registered.
 	fn process_queues(&mut self, sync_state: &mut SyncState) -> bool {
 		let mut pending_registrations = false;
 
