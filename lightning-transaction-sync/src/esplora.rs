@@ -1,11 +1,12 @@
 use crate::error::{TxSyncError, InternalError};
+use crate::types::{SyncState, FilterQueue, ConfirmedTx};
 
 use lightning::util::logger::Logger;
 use lightning::{log_error, log_given_level, log_info, log_internal, log_debug, log_trace};
 use lightning::chain::WatchedOutput;
 use lightning::chain::{Confirm, Filter};
 
-use bitcoin::{BlockHash, BlockHeader, Script, Transaction, Txid};
+use bitcoin::{BlockHash, Script, Txid};
 
 use esplora_client::Builder;
 #[cfg(feature = "async-interface")]
@@ -327,68 +328,6 @@ where
 	}
 }
 
-// Represents the current state.
-struct SyncState {
-	// Transactions that were previously processed, but must not be forgotten
-	// yet since they still need to be monitored for confirmation on-chain.
-	watched_transactions: HashSet<Txid>,
-	// Outputs that were previously processed, but must not be forgotten yet as
-	// as we still need to monitor any spends on-chain.
-	watched_outputs: HashSet<WatchedOutput>,
-	// The tip hash observed during our last sync.
-	last_sync_hash: Option<BlockHash>,
-	// Indicates whether we need to resync, e.g., after encountering an error.
-	pending_sync: bool,
-}
-
-impl SyncState {
-	fn new() -> Self {
-		Self {
-			watched_transactions: HashSet::new(),
-			watched_outputs: HashSet::new(),
-			last_sync_hash: None,
-			pending_sync: false,
-		}
-	}
-}
-
-// A queue that is to be filled by `Filter` and drained during the next syncing round.
-struct FilterQueue {
-	// Transactions that were registered via the `Filter` interface and have to be processed.
-	transactions: HashSet<Txid>,
-	// Outputs that were registered via the `Filter` interface and have to be processed.
-	outputs: HashSet<WatchedOutput>,
-}
-
-impl FilterQueue {
-	fn new() -> Self {
-		Self {
-			transactions: HashSet::new(),
-			outputs: HashSet::new(),
-		}
-	}
-
-	// Processes the transaction and output queues and adds them to the given [`SyncState`].
-	//
-	// Returns `true` if new items had been registered.
-	fn process_queues(&mut self, sync_state: &mut SyncState) -> bool {
-		let mut pending_registrations = false;
-
-		if !self.transactions.is_empty() {
-			pending_registrations = true;
-
-			sync_state.watched_transactions.extend(self.transactions.drain());
-		}
-
-		if !self.outputs.is_empty() {
-			pending_registrations = true;
-
-			sync_state.watched_outputs.extend(self.outputs.drain());
-		}
-		pending_registrations
-	}
-}
-
 #[cfg(feature = "async-interface")]
 type MutexType<I> = futures::lock::Mutex<I>;
 #[cfg(not(feature = "async-interface"))]
@@ -400,13 +339,6 @@ pub type EsploraClientType = AsyncClient;
 #[cfg(not(feature = "async-interface"))]
 pub type EsploraClientType = BlockingClient;
 
-
-struct ConfirmedTx {
-	tx: Transaction,
-	block_header: BlockHeader,
-	block_height: u32,
-	pos: usize,
-}
 
 impl<L: Deref> Filter for EsploraSyncClient<L>
 where

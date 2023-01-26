@@ -68,6 +68,9 @@ extern crate bdk_macros;
 #[cfg(any(feature = "esplora-blocking", feature = "esplora-async"))]
 mod esplora;
 
+#[cfg(any(feature = "esplora-blocking", feature = "esplora-async"))]
+mod types;
+
 #[cfg(test)]
 mod tests;
 
