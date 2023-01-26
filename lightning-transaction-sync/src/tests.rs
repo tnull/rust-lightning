@@ -1,5 +1,8 @@
-#[cfg(any(feature = "esplora-blocking", feature = "esplora-async"))]
-use crate::esplora::EsploraSyncClient;
+#[cfg(feature = "esplora-async")]
+use crate::AsyncEsploraSyncClient;
+#[cfg(feature = "esplora-blocking")]
+use crate::BlockingEsploraSyncClient;
+
 use lightning::chain::{Confirm, Filter};
 use lightning::chain::transaction::TransactionData;
 use lightning::util::logger::{Logger, Record};
@@ -164,7 +167,7 @@ fn test_esplora_syncs() {
 	premine();
 	let mut logger = TestLogger {};
 	let esplora_url = format!("http://{}", get_electrsd().esplora_url.as_ref().unwrap());
-	let tx_sync = EsploraSyncClient::new(esplora_url, &mut logger);
+	let tx_sync = BlockingEsploraSyncClient::new(esplora_url, &mut logger);
 	let confirmable = TestConfirmable::new();
 
 	// Check we pick up on new best blocks
@@ -249,7 +252,7 @@ async fn test_esplora_syncs() {
 	premine();
 	let mut logger = TestLogger {};
 	let esplora_url = format!("http://{}", get_electrsd().esplora_url.as_ref().unwrap());
-	let tx_sync = EsploraSyncClient::new(esplora_url, &mut logger);
+	let tx_sync = AsyncEsploraSyncClient::new(esplora_url, &mut logger);
 	let confirmable = TestConfirmable::new();
 
 	// Check we pick up on new best blocks

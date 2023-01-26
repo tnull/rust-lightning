@@ -13,7 +13,7 @@
 //! ## Usage Example:
 //!
 //! ```ignore
-//! let tx_sync = Arc::new(EsploraSyncClient::new(
+//! let tx_sync = Arc::new(BlockingEsploraSyncClient::new(
 //! 	esplora_server_url,
 //! 	Arc::clone(&some_logger),
 //! ));
@@ -71,11 +71,13 @@ mod esplora;
 #[cfg(any(feature = "esplora-blocking", feature = "esplora-async"))]
 mod types;
 
-#[cfg(all(test, any(esplora_async, esplora_blocking)))]
+#[cfg(all(test, any(feature = "esplora-async", feature = "esplora-blocking")))]
 mod tests;
 
 mod error;
 pub use error::TxSyncError;
 
-#[cfg(any(feature = "esplora-blocking", feature = "esplora-async"))]
-pub use esplora::EsploraSyncClient;
+#[cfg(feature = "esplora-async")]
+pub use esplora::AsyncEsploraSyncClient;
+#[cfg(feature = "esplora-blocking")]
+pub use esplora::BlockingEsploraSyncClient;

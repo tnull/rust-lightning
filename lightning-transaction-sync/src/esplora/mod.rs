@@ -1,3 +1,13 @@
+#[cfg(feature = "esplora-async")]
+mod r#async;
+#[cfg(feature = "esplora-blocking")]
+mod blocking;
+
+#[cfg(feature = "esplora-async")]
+pub use r#async::AsyncEsploraSyncClient;
+#[cfg(feature = "esplora-blocking")]
+pub use blocking::BlockingEsploraSyncClient;
+
 use crate::error::{TxSyncError, InternalError};
 use crate::types::{SyncState, FilterQueue, ConfirmedTx};
 
@@ -17,16 +27,8 @@ use esplora_client::blocking::BlockingClient;
 use std::collections::HashSet;
 use core::ops::Deref;
 
-/// Synchronizes LDK with a given [`Esplora`] server.
-///
-/// Needs to be registered with a [`ChainMonitor`] via the [`Filter`] interface to be informed of
-/// transactions and outputs to monitor for on-chain confirmation, unconfirmation, and
-/// reconfirmation.
-///
-/// [`Esplora`]: https://github.com/Blockstream/electrs
-/// [`ChainMonitor`]: lightning::chain::chainmonitor::ChainMonitor
-/// [`Filter`]: lightning::chain::Filter
-pub struct EsploraSyncClient<L: Deref>
+
+struct EsploraSyncClient<L: Deref>
 where
 	L::Target: Logger,
 {
@@ -335,9 +337,9 @@ type MutexType<I> = std::sync::Mutex<I>;
 
 /// The underlying client type.
 #[cfg(feature = "async-interface")]
-pub type EsploraClientType = AsyncClient;
+type EsploraClientType = AsyncClient;
 #[cfg(not(feature = "async-interface"))]
-pub type EsploraClientType = BlockingClient;
+type EsploraClientType = BlockingClient;
 
 
 impl<L: Deref> Filter for EsploraSyncClient<L>
