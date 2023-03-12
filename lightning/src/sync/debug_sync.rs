@@ -11,6 +11,7 @@ use std::sync::RwLock as StdRwLock;
 use std::sync::RwLockReadGuard as StdRwLockReadGuard;
 use std::sync::RwLockWriteGuard as StdRwLockWriteGuard;
 use std::sync::Condvar as StdCondvar;
+use std::sync::WaitTimeoutResult as StdWaitTimeoutResult;
 
 use crate::prelude::HashMap;
 
@@ -30,6 +31,16 @@ pub struct Condvar {
 	inner: StdCondvar,
 }
 
+pub struct WaitTimeoutResult {
+	inner: StdWaitTimeoutResult,
+}
+
+impl WaitTimeoutResult {
+	pub fn timed_out(&self) -> bool {
+		self.inner.timed_out()
+	}
+}
+
 impl Condvar {
 	pub fn new() -> Condvar {
 		Condvar { inner: StdCondvar::new() }
@@ -44,6 +55,13 @@ impl Condvar {
 	pub fn wait_timeout<'a, T>(&'a self, guard: MutexGuard<'a, T>, dur: Duration) -> LockResult<(MutexGuard<'a, T>, ())> {
 		let mutex = guard.mutex;
 		self.inner.wait_timeout(guard.into_inner(), dur).map(|(lock, _)| (MutexGuard { mutex, lock }, ())).map_err(|_| ())
+	}
+
+	pub fn wait_timeout_while<'a, T, F>(&self, guard: MutexGuard<'a, T>, dur: Duration, condition: F) -> LockResult<(MutexGuard<'a, T>, WaitTimeoutResult)> 
+		where F: FnMut(&mut T) -> bool,
+	{
+		let mutex = guard.mutex;
+		self.inner.wait_timeout_while(guard.into_inner(), dur, condition).map(|(lock, timeout_res)| (MutexGuard { mutex, lock }, WaitTimeoutResult{ inner: timeout_res })).map_err(|_| ())
 	}
 
 	pub fn notify_all(&self) { self.inner.notify_all(); }

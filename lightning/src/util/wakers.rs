@@ -80,25 +80,11 @@ impl Notifier {
 	#[cfg(any(test, feature = "std"))]
 	pub(crate) fn wait_timeout(&self, max_wait: Duration) -> bool {
 		let current_time = Instant::now();
-		loop {
-			let mut guard = self.propagate_future_state_to_notify_flag();
-			check_woken!(guard, true);
-			guard = self.condvar.wait_timeout(guard, max_wait).unwrap().0;
-			check_woken!(guard, true);
-			// Due to spurious wakeups that can happen on `wait_timeout`, here we need to check if the
-			// desired wait time has actually passed, and if not then restart the loop with a reduced wait
-			// time. Note that this logic can be highly simplified through the use of
-			// `Condvar::wait_while` and `Condvar::wait_timeout_while`, if and when our MSRV is raised to
-			// 1.42.0.
-			let elapsed = current_time.elapsed();
-			if elapsed >= max_wait {
-				return false;
-			}
-			match max_wait.checked_sub(elapsed) {
-				None => return false,
-				Some(_) => continue
-			}
-		}
+		let mut guard = self.propagate_future_state_to_notify_flag();
+		check_woken!(guard, true);
+		let (mut guard, timeout_res) = self.condvar.wait_timeout_while(guard, max_wait, |_| { current_time.elapsed() > max_wait }).unwrap();
+		check_woken!(guard, true);
+		timeout_res.timed_out()
 	}
 
 	/// Wake waiters, tracking that wake needs to occur even if there are currently no waiters.
