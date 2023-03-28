@@ -8,7 +8,7 @@ HOST_PLATFORM="$(rustc --version --verbose | grep "host:" | awk '{ print $2 }')"
 [ "$RUSTC_MINOR_VERSION" -lt 49 ] && cargo update -p tokio --precise "1.14.0" --verbose
 [[ "$RUSTC_MINOR_VERSION" -gt 48  &&  "$RUSTC_MINOR_VERSION" -lt 56 ]] && cargo update -p tokio --precise "1.26.0" --verbose
 # Syn MSRV is rustc 1.31 for versions 1.0.* and rustc 1.56 for 2.0.*.
-[ "$RUSTC_MINOR_VERSION" -lt 56 ] && cargo update -p syn --precise "1.0.109" --verbose
+#[ "$RUSTC_MINOR_VERSION" -lt 56 ] && cargo update -p syn --precise "1.0.109" --verbose
 [ "$LDK_COVERAGE_BUILD" != "" ] && export RUSTFLAGS="-C link-dead-code"
 
 export RUST_BACKTRACE=1
