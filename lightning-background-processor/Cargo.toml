@@ -29,4 +29,4 @@ lightning-rapid-gossip-sync = { version = "0.0.116", path = "../lightning-rapid-
 tokio = { version = "1.14", features = [ "macros", "rt", "rt-multi-thread", "sync", "time" ] }
 lightning = { version = "0.0.116", path = "../lightning", features = ["_test_utils"] }
 lightning-invoice = { version = "0.24.0", path = "../lightning-invoice" }
-lightning-persister = { version = "0.0.116", path = "../lightning-persister" }
+lightning-storage = { version = "0.0.116", path = "../lightning-storage" }
