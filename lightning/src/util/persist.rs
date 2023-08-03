@@ -78,15 +78,6 @@ pub trait KVStore {
 	fn list(&self, namespace: &str) -> io::Result<Vec<String>>;
 }
 
-/// Trait for a key-value store for persisting some writeable object at some key
-/// Implementing `KVStorePersister` provides auto-implementations for [`Persister`]
-/// and [`Persist`] traits.  It uses "manager", "network_graph",
-/// and "monitors/{funding_txo_id}_{funding_txo_index}" for keys.
-pub trait KVStorePersister {
-	/// Persist the given writeable using the provided key
-	fn persist<W: Writeable>(&self, key: &str, object: &W) -> io::Result<()>;
-}
-
 /// Trait that handles persisting a [`ChannelManager`], [`NetworkGraph`], and [`WriteableScore`] to disk.
 pub trait Persister<'a, M: Deref, T: Deref, ES: Deref, NS: Deref, SP: Deref, F: Deref, R: Deref, L: Deref, S: WriteableScore<'a>>
 	where M::Target: 'static + chain::Watch<<SP::Target as SignerProvider>::Signer>,
