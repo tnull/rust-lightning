@@ -16,6 +16,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 lightning = { version = "0.0.116", path = "../lightning", default-features = false, features = ["std"] }
 
+[dev-dependencies]
+bitcoin = { version = "0.29.0", default-features = false }
+lightning = { version = "0.0.116", path = "../lightning", features = ["_test_utils"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.48.0", default-features = false, features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
 
