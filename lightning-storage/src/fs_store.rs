@@ -7,9 +7,6 @@ use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
-#[cfg(not(target_os = "windows"))]
-use std::os::unix::io::AsRawFd;
-
 #[cfg(target_os = "windows")]
 use {std::ffi::OsStr, std::os::windows::ffi::OsStrExt};
 
@@ -17,7 +14,7 @@ use {std::ffi::OsStr, std::os::windows::ffi::OsStrExt};
 macro_rules! call {
 	($e: expr) => {
 		if $e != 0 {
-			return Ok(());
+			()
 		} else {
 			return Err(std::io::Error::last_os_error());
 		}
@@ -109,11 +106,6 @@ impl KVStore for FilesystemStore {
 		#[cfg(not(target_os = "windows"))]
 		{
 			fs::rename(&tmp_file_path, &dest_file_path)?;
-			let dir_file = fs::OpenOptions::new().read(true).open(&parent_directory)?;
-			unsafe {
-				libc::fsync(dir_file.as_raw_fd());
-			}
-			Ok(())
 		}
 
 		#[cfg(target_os = "windows")]
@@ -140,6 +132,11 @@ impl KVStore for FilesystemStore {
 				});
 			}
 		}
+
+		let dir_file = fs::OpenOptions::new().read(true).open(&parent_directory)?;
+		dir_file.sync_all()?;
+
+		Ok(())
 	}
 
 	fn remove(&self, namespace: &str, key: &str) -> std::io::Result<()> {
@@ -163,24 +160,21 @@ impl KVStore for FilesystemStore {
 		}
 
 		fs::remove_file(&dest_file_path)?;
-		#[cfg(not(target_os = "windows"))]
-		{
-			let parent_directory = dest_file_path.parent().ok_or_else(|| {
-				let msg =
-					format!("Could not retrieve parent directory of {}.", dest_file_path.display());
-				std::io::Error::new(std::io::ErrorKind::InvalidInput, msg)
-			})?;
-			let dir_file = fs::OpenOptions::new().read(true).open(parent_directory)?;
-			unsafe {
-				// The above call to `fs::remove_file` corresponds to POSIX `unlink`, whose changes
-				// to the inode might get cached (and hence possibly lost on crash), depending on
-				// the target platform and file system.
-				//
-				// In order to assert we permanently removed the file in question we therefore
-				// call `fsync` on the parent directory on platforms that support it,
-				libc::fsync(dir_file.as_raw_fd());
-			}
-		}
+
+		let parent_directory = dest_file_path.parent().ok_or_else(|| {
+			let msg =
+				format!("Could not retrieve parent directory of {}.", dest_file_path.display());
+			std::io::Error::new(std::io::ErrorKind::InvalidInput, msg)
+		})?;
+
+		// The above call to `fs::remove_file` corresponds to POSIX `unlink`, whose changes
+		// to the inode might get cached (and hence possibly lost on crash), depending on
+		// the target platform and file system.
+		//
+		// In order to assert we permanently removed the file in question we therefore
+		// call `fsync` on the parent directory on platforms that support it,
+		let dir_file = fs::OpenOptions::new().read(true).open(parent_directory)?;
+		dir_file.sync_all()?;
 
 		if dest_file_path.is_file() {
 			return Err(std::io::Error::new(std::io::ErrorKind::Other, "Removing key failed"));
