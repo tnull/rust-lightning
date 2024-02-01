@@ -89,10 +89,6 @@ popd
 
 echo -e "\n\nBuilding and testing Transaction Sync Clients with features"
 pushd lightning-transaction-sync
-# reqwest 0.11.21 had a regression that broke its 1.63.0 MSRV
-[ "$RUSTC_MINOR_VERSION" -lt 65 ] && cargo update -p reqwest --precise "0.11.20" --verbose
-DOWNLOAD_ELECTRS_AND_BITCOIND
-
 cargo test --verbose --color always --features esplora-blocking
 cargo check --verbose --color always --features esplora-blocking
 cargo test --verbose --color always --features esplora-async
