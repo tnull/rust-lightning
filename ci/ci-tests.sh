@@ -81,30 +81,26 @@ cargo test --verbose --color always --features rpc-client,rest-client,tokio
 cargo check --verbose --color always --features rpc-client,rest-client,tokio
 popd
 
-if [[ "$HOST_PLATFORM" != *windows* ]]; then
-	echo -e "\n\nBuilding and testing Transaction Sync Clients with features"
-	pushd lightning-transaction-sync
+echo -e "\n\nBuilding and testing Transaction Sync Clients with features"
+pushd lightning-transaction-sync
+# reqwest 0.11.21 had a regression that broke its 1.63.0 MSRV
+[ "$RUSTC_MINOR_VERSION" -lt 65 ] && cargo update -p reqwest --precise "0.11.20" --verbose
+# Starting with version 1.10.0, the `regex` crate has an MSRV of rustc 1.65.0.
+[ "$RUSTC_MINOR_VERSION" -lt 65 ] && cargo update -p regex --precise "1.9.6" --verbose
+# Starting with version 0.5.9 (there is no .6-.8), the `home` crate has an MSRV of rustc 1.70.0.
+[ "$RUSTC_MINOR_VERSION" -lt 70 ] && cargo update -p home --precise "0.5.5" --verbose
 
-	# reqwest 0.11.21 had a regression that broke its 1.63.0 MSRV
-	[ "$RUSTC_MINOR_VERSION" -lt 65 ] && cargo update -p reqwest --precise "0.11.20" --verbose
-	# Starting with version 1.10.0, the `regex` crate has an MSRV of rustc 1.65.0.
-	[ "$RUSTC_MINOR_VERSION" -lt 65 ] && cargo update -p regex --precise "1.9.6" --verbose
-	# Starting with version 0.5.9 (there is no .6-.8), the `home` crate has an MSRV of rustc 1.70.0.
-	[ "$RUSTC_MINOR_VERSION" -lt 70 ] && cargo update -p home --precise "0.5.5" --verbose
+DOWNLOAD_ELECTRS_AND_BITCOIND
 
-	DOWNLOAD_ELECTRS_AND_BITCOIND
-
-	RUSTFLAGS="$RUSTFLAGS --cfg no_download" cargo test --verbose --color always --features esplora-blocking
-	RUSTFLAGS="$RUSTFLAGS --cfg no_download" cargo check --verbose --color always --features esplora-blocking
-	RUSTFLAGS="$RUSTFLAGS --cfg no_download" cargo test --verbose --color always --features esplora-async
-	RUSTFLAGS="$RUSTFLAGS --cfg no_download" cargo check --verbose --color always --features esplora-async
-	RUSTFLAGS="$RUSTFLAGS --cfg no_download" cargo test --verbose --color always --features esplora-async-https
-	RUSTFLAGS="$RUSTFLAGS --cfg no_download" cargo check --verbose --color always --features esplora-async-https
-	RUSTFLAGS="$RUSTFLAGS --cfg no_download" cargo test --verbose --color always --features electrum
-	RUSTFLAGS="$RUSTFLAGS --cfg no_download" cargo check --verbose --color always --features electrum
-
-	popd
-fi
+RUSTFLAGS="$RUSTFLAGS --cfg no_download" cargo test --verbose --color always --features esplora-blocking
+RUSTFLAGS="$RUSTFLAGS --cfg no_download" cargo check --verbose --color always --features esplora-blocking
+RUSTFLAGS="$RUSTFLAGS --cfg no_download" cargo test --verbose --color always --features esplora-async
+RUSTFLAGS="$RUSTFLAGS --cfg no_download" cargo check --verbose --color always --features esplora-async
+RUSTFLAGS="$RUSTFLAGS --cfg no_download" cargo test --verbose --color always --features esplora-async-https
+RUSTFLAGS="$RUSTFLAGS --cfg no_download" cargo check --verbose --color always --features esplora-async-https
+RUSTFLAGS="$RUSTFLAGS --cfg no_download" cargo test --verbose --color always --features electrum
+RUSTFLAGS="$RUSTFLAGS --cfg no_download" cargo check --verbose --color always --features electrum
+popd
 
 echo -e "\n\nTest futures builds"
 pushd lightning-background-processor
