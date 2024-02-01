@@ -5,13 +5,7 @@ on:
 
 jobs:
   audit:
-    strategy:
-      matrix:
-        platform: [
-          ubuntu-latest,
-          macos-latest,
-          ]
-    runs-on: ${{ matrix.platform }}
+    runs-on: ubuntu-latest
     permissions:
       issues: write
       issues-reason: to create issues
