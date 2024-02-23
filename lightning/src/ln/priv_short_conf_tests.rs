@@ -599,7 +599,8 @@ fn test_0conf_channel_with_async_monitor() {
 	assert_eq!(events.len(), 1);
 	match events[0] {
 		Event::OpenChannelRequest { temporary_channel_id, .. } => {
-			nodes[1].node.accept_inbound_channel_from_trusted_peer_0conf(&temporary_channel_id, &nodes[0].node.get_our_node_id(), 0).unwrap();
+			nodes[1].node.accept_inbound_channel_from_trusted_peer_0conf(&temporary_channel_id,
+				&nodes[0].node.get_our_node_id(), 0, None).unwrap();
 		},
 		_ => panic!("Unexpected event"),
 	};
@@ -926,7 +927,7 @@ fn test_zero_conf_accept_reject() {
 		Event::OpenChannelRequest { temporary_channel_id, .. } => {
 			// Assert we fail to accept via the non-0conf method
 			assert!(nodes[1].node.accept_inbound_channel(&temporary_channel_id,
-				&nodes[0].node.get_our_node_id(), 0).is_err());
+				&nodes[0].node.get_our_node_id(), 0, None).is_err());
 		},
 		_ => panic!(),
 	}
@@ -955,7 +956,7 @@ fn test_zero_conf_accept_reject() {
 		Event::OpenChannelRequest { temporary_channel_id, .. } => {
 			// Assert we can accept via the 0conf method
 			assert!(nodes[1].node.accept_inbound_channel_from_trusted_peer_0conf(
-				&temporary_channel_id, &nodes[0].node.get_our_node_id(), 0).is_ok());
+				&temporary_channel_id, &nodes[0].node.get_our_node_id(), 0, None).is_ok());
 		},
 		_ => panic!(),
 	}
@@ -990,7 +991,8 @@ fn test_connect_before_funding() {
 	assert_eq!(events.len(), 1);
 	match events[0] {
 		Event::OpenChannelRequest { temporary_channel_id, .. } => {
-			nodes[1].node.accept_inbound_channel_from_trusted_peer_0conf(&temporary_channel_id, &nodes[0].node.get_our_node_id(), 0).unwrap();
+			nodes[1].node.accept_inbound_channel_from_trusted_peer_0conf(&temporary_channel_id,
+				&nodes[0].node.get_our_node_id(), 0, None).unwrap();
 		},
 		_ => panic!("Unexpected event"),
 	};

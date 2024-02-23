@@ -68,7 +68,7 @@ use crate::onion_message::messenger::{Destination, MessageRouter, PendingOnionMe
 use crate::onion_message::offers::{OffersMessage, OffersMessageHandler};
 use crate::sign::{EntropySource, NodeSigner, Recipient, SignerProvider};
 use crate::sign::ecdsa::WriteableEcdsaChannelSigner;
-use crate::util::config::{UserConfig, ChannelConfig, ChannelConfigUpdate};
+use crate::util::config::{UserConfig, ChannelConfig, ChannelConfigUpdate, ChannelHandshakeConfig};
 use crate::util::wakers::{Future, Notifier};
 use crate::util::scid_utils::fake_scid;
 use crate::util::string::UntrustedString;
@@ -6047,10 +6047,17 @@ where
 	/// for zero confirmations. Instead, `accept_inbound_channel_from_trusted_peer_0conf` must be
 	/// used to accept such channels.
 	///
+	/// If `channel_handshake_config` is `Some`, it will override the configured default values for
+	/// this channel.
+	///
 	/// [`Event::OpenChannelRequest`]: events::Event::OpenChannelRequest
 	/// [`Event::ChannelClosed::user_channel_id`]: events::Event::ChannelClosed::user_channel_id
-	pub fn accept_inbound_channel(&self, temporary_channel_id: &ChannelId, counterparty_node_id: &PublicKey, user_channel_id: u128) -> Result<(), APIError> {
-		self.do_accept_inbound_channel(temporary_channel_id, counterparty_node_id, false, user_channel_id)
+	pub fn accept_inbound_channel(&self, temporary_channel_id: &ChannelId,
+		counterparty_node_id: &PublicKey, user_channel_id: u128,
+		channel_handshake_config: Option<ChannelHandshakeConfig>
+	) -> Result<(), APIError> {
+		self.do_accept_inbound_channel(temporary_channel_id, counterparty_node_id, false,
+			user_channel_id, channel_handshake_config)
 	}
 
 	/// Accepts a request to open a channel after a [`events::Event::OpenChannelRequest`], treating
@@ -6069,13 +6076,23 @@ where
 	/// If it does not confirm before we decide to close the channel, or if the funding transaction
 	/// does not pay to the correct script the correct amount, *you will lose funds*.
 	///
+	/// If `channel_handshake_config` is `Some`, it will override the configured default values for
+	/// this channel.
+	///
 	/// [`Event::OpenChannelRequest`]: events::Event::OpenChannelRequest
 	/// [`Event::ChannelClosed::user_channel_id`]: events::Event::ChannelClosed::user_channel_id
-	pub fn accept_inbound_channel_from_trusted_peer_0conf(&self, temporary_channel_id: &ChannelId, counterparty_node_id: &PublicKey, user_channel_id: u128) -> Result<(), APIError> {
-		self.do_accept_inbound_channel(temporary_channel_id, counterparty_node_id, true, user_channel_id)
+	pub fn accept_inbound_channel_from_trusted_peer_0conf(&self, temporary_channel_id: &ChannelId,
+		counterparty_node_id: &PublicKey, user_channel_id: u128,
+		channel_handshake_config: Option<ChannelHandshakeConfig>
+	) -> Result<(), APIError> {
+		self.do_accept_inbound_channel(temporary_channel_id, counterparty_node_id, true,
+			user_channel_id, channel_handshake_config)
 	}
 
-	fn do_accept_inbound_channel(&self, temporary_channel_id: &ChannelId, counterparty_node_id: &PublicKey, accept_0conf: bool, user_channel_id: u128) -> Result<(), APIError> {
+	fn do_accept_inbound_channel(&self, temporary_channel_id: &ChannelId,
+		counterparty_node_id: &PublicKey, accept_0conf: bool, user_channel_id: u128,
+		channel_handshake_config: Option<ChannelHandshakeConfig>
+	) -> Result<(), APIError> {
 
 		let logger = WithContext::from(&self.logger, Some(*counterparty_node_id), Some(*temporary_channel_id));
 		let _persistence_guard = PersistenceNotifierGuard::notify_on_drop(self);
@@ -6094,6 +6111,10 @@ where
 		let peer_state = &mut *peer_state_lock;
 		let is_only_peer_channel = peer_state.total_channel_count() == 1;
 
+		let channel_handshake_config = channel_handshake_config
+			.unwrap_or(self.default_configuration.channel_handshake_config);
+		let user_config = UserConfig { channel_handshake_config, ..self.default_configuration };
+
 		// Find (and remove) the channel in the unaccepted table. If it's not there, something weird is
 		// happening and return an error. N.B. that we create channel with an outbound SCID of zero so
 		// that we can delay allocating the SCID until after we're sure that the checks below will
@@ -6103,7 +6124,7 @@ where
 				let best_block_height = self.best_block.read().unwrap().height();
 				InboundV1Channel::new(&self.fee_estimator, &self.entropy_source, &self.signer_provider,
 					counterparty_node_id.clone(), &self.channel_type_features(), &peer_state.latest_features,
-					&unaccepted_channel.open_channel_msg, user_channel_id, &self.default_configuration, best_block_height,
+					&unaccepted_channel.open_channel_msg, user_channel_id, &user_config, best_block_height,
 					&self.logger, accept_0conf).map_err(|e| {
 						let err_str = e.to_string();
 						log_error!(logger, "{}", err_str);
@@ -12061,7 +12082,8 @@ mod tests {
 		// Test the API functions.
 		check_not_connected_to_peer_error(nodes[0].node.create_channel(unkown_public_key, 1_000_000, 500_000_000, 42, None, None), unkown_public_key);
 
-		check_unkown_peer_error(nodes[0].node.accept_inbound_channel(&channel_id, &unkown_public_key, 42), unkown_public_key);
+		check_unkown_peer_error(nodes[0].node.accept_inbound_channel(&channel_id,
+			&unkown_public_key, 42, None), unkown_public_key);
 
 		check_unkown_peer_error(nodes[0].node.close_channel(&channel_id, &unkown_public_key), unkown_public_key);
 
@@ -12091,7 +12113,8 @@ mod tests {
 		let channel_id = ChannelId::from_bytes([4; 32]);
 
 		// Test the API functions.
-		check_api_misuse_error(nodes[0].node.accept_inbound_channel(&channel_id, &counterparty_node_id, 42));
+		check_api_misuse_error(nodes[0].node.accept_inbound_channel(&channel_id,
+			&counterparty_node_id, 42, None));
 
 		check_channel_unavailable_error(nodes[0].node.close_channel(&channel_id, &counterparty_node_id), channel_id, counterparty_node_id);
 
@@ -12282,7 +12305,8 @@ mod tests {
 			let events = nodes[1].node.get_and_clear_pending_events();
 			match events[0] {
 				Event::OpenChannelRequest { temporary_channel_id, .. } => {
-					nodes[1].node.accept_inbound_channel(&temporary_channel_id, &random_pk, 23).unwrap();
+					nodes[1].node.accept_inbound_channel(&temporary_channel_id, &random_pk, 23,
+						None).unwrap();
 				}
 				_ => panic!("Unexpected event"),
 			}
@@ -12300,7 +12324,9 @@ mod tests {
 		let events = nodes[1].node.get_and_clear_pending_events();
 		match events[0] {
 			Event::OpenChannelRequest { temporary_channel_id, .. } => {
-				match nodes[1].node.accept_inbound_channel(&temporary_channel_id, &last_random_pk, 23) {
+				let res = nodes[1].node.accept_inbound_channel(&temporary_channel_id,
+						&last_random_pk, 23, None);
+				match res {
 					Err(APIError::APIMisuseError { err }) =>
 						assert_eq!(err, "Too many peers with unfunded channels, refusing to accept new ones"),
 					_ => panic!(),
@@ -12316,7 +12342,8 @@ mod tests {
 		let events = nodes[1].node.get_and_clear_pending_events();
 		match events[0] {
 			Event::OpenChannelRequest { temporary_channel_id, .. } => {
-				nodes[1].node.accept_inbound_channel_from_trusted_peer_0conf(&temporary_channel_id, &last_random_pk, 23).unwrap();
+				nodes[1].node.accept_inbound_channel_from_trusted_peer_0conf(&temporary_channel_id,
+					&last_random_pk, 23, None).unwrap();
 			}
 			_ => panic!("Unexpected event"),
 		}
@@ -12433,7 +12460,8 @@ mod tests {
 		let events = nodes[2].node.get_and_clear_pending_events();
 		match events[0] {
 			Event::OpenChannelRequest { temporary_channel_id, .. } =>
-				nodes[2].node.accept_inbound_channel(&temporary_channel_id, &nodes[0].node.get_our_node_id(), 23).unwrap(),
+				nodes[2].node.accept_inbound_channel(&temporary_channel_id,
+					&nodes[0].node.get_our_node_id(),23, None).unwrap(),
 			_ => panic!("Unexpected event"),
 		}
 		get_event_msg!(nodes[2], MessageSendEvent::SendAcceptChannel, nodes[0].node.get_our_node_id());
