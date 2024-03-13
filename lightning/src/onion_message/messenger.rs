@@ -355,7 +355,7 @@ where
 
 		// Ensure peers have at least three channels so that it is more difficult to infer the
 		// recipient's node_id.
-		const MIN_PEER_CHANNELS: usize = 3;
+		const MIN_PEER_CHANNELS: usize = 0;
 
 		let network_graph = self.network_graph.deref().read_only();
 		let is_recipient_announced =
@@ -387,12 +387,8 @@ where
 		match paths {
 			Ok(paths) if !paths.is_empty() => Ok(paths),
 			_ => {
-				if is_recipient_announced {
-					BlindedPath::one_hop_for_message(recipient, &*self.entropy_source, secp_ctx)
-						.map(|path| vec![path])
-				} else {
-					Err(())
-				}
+				BlindedPath::one_hop_for_message(recipient, &*self.entropy_source, secp_ctx)
+					.map(|path| vec![path])
 			},
 		}
 	}

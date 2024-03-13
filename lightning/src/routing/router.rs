@@ -90,7 +90,7 @@ impl<G: Deref<Target = NetworkGraph<L>> + Clone, L: Deref, ES: Deref, S: Deref, 
 
 		// Ensure peers have at least three channels so that it is more difficult to infer the
 		// recipient's node_id.
-		const MIN_PEER_CHANNELS: usize = 3;
+		const MIN_PEER_CHANNELS: usize = 0;
 
 		let network_graph = self.network_graph.deref().read_only();
 		let paths = first_hops.into_iter()
@@ -144,13 +144,9 @@ impl<G: Deref<Target = NetworkGraph<L>> + Clone, L: Deref, ES: Deref, S: Deref, 
 		match paths {
 			Ok(paths) if !paths.is_empty() => Ok(paths),
 			_ => {
-				if network_graph.nodes().contains_key(&NodeId::from_pubkey(&recipient)) {
-					BlindedPath::one_hop_for_payment(
-						recipient, tlvs, MIN_FINAL_CLTV_EXPIRY_DELTA, &*self.entropy_source, secp_ctx
+				BlindedPath::one_hop_for_payment(
+					recipient, tlvs, MIN_FINAL_CLTV_EXPIRY_DELTA, &*self.entropy_source, secp_ctx
 					).map(|path| vec![path])
-				} else {
-					Err(())
-				}
 			},
 		}
 	}
