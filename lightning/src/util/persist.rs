@@ -92,7 +92,7 @@ pub const MONITOR_UPDATING_PERSISTER_PREPEND_SENTINEL: &[u8] = &[0xFF; 2];
 /// **Note:** Users migrating custom persistence backends from the pre-v0.0.117 `KVStorePersister`
 /// interface can use a concatenation of `[{primary_namespace}/[{secondary_namespace}/]]{key}` to
 /// recover a `key` compatible with the data model previously assumed by `KVStorePersister::persist`.
-pub trait KVStore {
+pub trait KVStore: Send + Sync {
 	/// Returns the data stored for the given `primary_namespace`, `secondary_namespace`, and
 	/// `key`.
 	///
@@ -187,7 +187,7 @@ impl<'a, A: KVStore, M: Deref, T: Deref, ES: Deref, NS: Deref, SP: Deref, F: Der
 	}
 }
 
-impl<'a, M: Deref, T: Deref, ES: Deref, NS: Deref, SP: Deref, F: Deref, R: Deref, L: Deref, S: WriteableScore<'a>> Persister<'a, M, T, ES, NS, SP, F, R, L, S> for dyn KVStore + Send + Sync
+impl<'a, M: Deref, T: Deref, ES: Deref, NS: Deref, SP: Deref, F: Deref, R: Deref, L: Deref, S: WriteableScore<'a>> Persister<'a, M, T, ES, NS, SP, F, R, L, S> for dyn KVStore
 	where M::Target: 'static + chain::Watch<<SP::Target as SignerProvider>::EcdsaSigner>,
 		T::Target: 'static + BroadcasterInterface,
 		ES::Target: 'static + EntropySource,
@@ -253,7 +253,7 @@ impl<ChannelSigner: WriteableEcdsaChannelSigner, K: KVStore> Persist<ChannelSign
 	}
 }
 
-impl<ChannelSigner: WriteableEcdsaChannelSigner> Persist<ChannelSigner> for dyn KVStore + Send + Sync {
+impl<ChannelSigner: WriteableEcdsaChannelSigner> Persist<ChannelSigner> for dyn KVStore {
 	// TODO: We really need a way for the persister to inform the user that its time to crash/shut
 	// down once these start returning failure.
 	// Then we should return InProgress rather than UnrecoverableError, implying we should probably
