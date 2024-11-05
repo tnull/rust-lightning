@@ -9352,6 +9352,18 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 		Ok(())
 	}
 
+	fn internal_closing_complete(
+		&self, _counterparty_node_id: PublicKey, _msg: msgs::ClosingComplete,
+	) -> Result<(), MsgHandleErrInternal> {
+		unimplemented!("Handling ClosingComplete is not implemented");
+	}
+
+	fn internal_closing_sig(
+		&self, _counterparty_node_id: PublicKey, _msg: msgs::ClosingSig,
+	) -> Result<(), MsgHandleErrInternal> {
+		unimplemented!("Handling ClosingSig is not implemented");
+	}
+
 	#[rustfmt::skip]
 	fn internal_update_add_htlc(&self, counterparty_node_id: &PublicKey, msg: &msgs::UpdateAddHTLC) -> Result<(), MsgHandleErrInternal> {
 		//TODO: BOLT 4 points out a specific attack where a peer may re-send an onion packet and
@@ -12648,6 +12660,24 @@ where
 		let _persistence_guard = PersistenceNotifierGuard::notify_on_drop(self);
 		let res = self.internal_closing_signed(&counterparty_node_id, msg);
 		let _ = handle_error!(self, res, counterparty_node_id);
+	}
+
+	fn handle_closing_complete(&self, counterparty_node_id: PublicKey, msg: msgs::ClosingComplete) {
+		let _persistence_guard = PersistenceNotifierGuard::notify_on_drop(self);
+		let _ = handle_error!(
+			self,
+			self.internal_closing_complete(counterparty_node_id, msg),
+			counterparty_node_id
+		);
+	}
+
+	fn handle_closing_sig(&self, counterparty_node_id: PublicKey, msg: msgs::ClosingSig) {
+		let _persistence_guard = PersistenceNotifierGuard::notify_on_drop(self);
+		let _ = handle_error!(
+			self,
+			self.internal_closing_sig(counterparty_node_id, msg),
+			counterparty_node_id
+		);
 	}
 
 	fn handle_update_add_htlc(&self, counterparty_node_id: PublicKey, msg: &msgs::UpdateAddHTLC) {

@@ -304,6 +304,12 @@ impl ChannelMessageHandler for ErroringMessageHandler {
 	fn handle_closing_signed(&self, their_node_id: PublicKey, msg: &msgs::ClosingSigned) {
 		ErroringMessageHandler::push_error(self, their_node_id, msg.channel_id);
 	}
+	fn handle_closing_complete(&self, their_node_id: PublicKey, msg: msgs::ClosingComplete) {
+		ErroringMessageHandler::push_error(self, their_node_id, msg.channel_id);
+	}
+	fn handle_closing_sig(&self, their_node_id: PublicKey, msg: msgs::ClosingSig) {
+		ErroringMessageHandler::push_error(self, their_node_id, msg.channel_id);
+	}
 	fn handle_stfu(&self, their_node_id: PublicKey, msg: &msgs::Stfu) {
 		ErroringMessageHandler::push_error(&self, their_node_id, msg.channel_id);
 	}
@@ -2096,6 +2102,12 @@ impl<Descriptor: SocketDescriptor, CM: Deref, RM: Deref, OM: Deref, L: Deref, CM
 			},
 			wire::Message::ClosingSigned(msg) => {
 				self.message_handler.chan_handler.handle_closing_signed(their_node_id, &msg);
+			},
+			wire::Message::ClosingComplete(msg) => {
+				self.message_handler.chan_handler.handle_closing_complete(their_node_id, msg);
+			},
+			wire::Message::ClosingSig(msg) => {
+				self.message_handler.chan_handler.handle_closing_sig(their_node_id, msg);
 			},
 
 			// Commitment messages:
