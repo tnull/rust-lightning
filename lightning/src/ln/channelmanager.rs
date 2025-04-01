@@ -9299,7 +9299,10 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				hash_map::Entry::Occupied(mut chan_entry) => {
 					if let Some(chan) = chan_entry.get_mut().as_funded_mut() {
 						let logger = WithChannelContext::from(&self.logger, &chan.context, None);
-						let (closing_signed, tx, shutdown_result) = try_channel_entry!(self, peer_state, chan.closing_signed(&self.fee_estimator, &msg, &&logger), chan_entry);
+						let (closing_signed, tx, shutdown_result) = try_channel_entry!(self, peer_state,
+							chan.closing_signed(&self.fee_estimator, &peer_state.latest_features, &msg, &&logger),
+							chan_entry
+						);
 						debug_assert_eq!(shutdown_result.is_some(), chan.is_shutdown());
 						if let Some(msg) = closing_signed {
 							peer_state.pending_msg_events.push(MessageSendEvent::SendClosingSigned {
@@ -9355,12 +9358,58 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 	fn internal_closing_complete(
 		&self, _counterparty_node_id: PublicKey, _msg: msgs::ClosingComplete,
 	) -> Result<(), MsgHandleErrInternal> {
+		// The receiver of `closing_complete` (aka. "the closee"):
+		//  - If `fee_satoshis` is greater than the closer's outstanding balance:
+		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
+		//  - If `closee_scriptpubkey` does not match the last script it sent (from `closing_complete` or from the initial `shutdown`):
+		//    - SHOULD ignore `closing_complete`.
+		//    - SHOULD send a `warning`.
+		//    - SHOULD close the connection.
+		//  - If `closer_scriptpubkey` is invalid (as detailed in the [`shutdown` requirements](#closing-initiation-shutdown)):
+		//    - SHOULD ignore `closing_complete`.
+		//    - SHOULD send a `warning`.
+		//    - SHOULD close the connection.
+		//  - If `closer_scriptpubkey` is a valid `OP_RETURN` script:
+		//    - MUST set the closer's output amount to zero so that all funds go to fees, as specified in [BOLT #3](03-transactions.md#closing-transaction).
+		//  - MUST generate the remote closing transaction as specified in [BOLT #3](03-transactions.md#closing-transaction).
+		//  - Select a signature for validation:
+		//    - If the local output amount is dust:
+		//      - MUST use `closer_output_only`.
+		//    - Otherwise, if it considers the local output amount uneconomical AND its `closee_scriptpubkey` is not `OP_RETURN`:
+		//      - MUST use `closer_output_only`.
+		//    - Otherwise, if `closer_and_closee_outputs` is present:
+		//      - MUST use `closer_and_closee_outputs`.
+		//    - Otherwise:
+		//      - MUST use `closee_output_only`.
+		//  - If the selected signature field does not exist:
+		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
+		//  - If the signature field is not valid for the corresponding closing transaction specified in [BOLT #3](03-transactions.md#closing-transaction):
+		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
+		//  - If the signature field is non-compliant with LOW-S-standard rule<sup>[LOWS](https://github.com/bitcoin/bitcoin/pull/6769)</sup>:
+		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
+		//  - MUST sign and broadcast the corresponding closing transaction.
+		//  - MUST send `closing_sig` with a single valid signature in the same TLV field as the `closing_complete`.
+		//  - MUST use `closer_scriptpubkey` for its own future `closing_complete` messages.
 		unimplemented!("Handling ClosingComplete is not implemented");
 	}
 
 	fn internal_closing_sig(
 		&self, _counterparty_node_id: PublicKey, _msg: msgs::ClosingSig,
 	) -> Result<(), MsgHandleErrInternal> {
+		// The receiver of `closing_sig`:
+		//  - If `closer_scriptpubkey`, `closee_scriptpubkey`, `fee_satoshis` or `locktime` don't match what was sent in `closing_complete`:
+		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
+		//  - If `tlvs` does not contain exactly one signature:
+		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
+		//  - If `tlvs` does not contain one of the TLV fields sent in `closing_complete`:
+		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
+		//  - If the signature field is not valid for the corresponding closing transaction specified in [BOLT #3](03-transactions.md#closing-transaction):
+		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
+		//  - If the signature field is non-compliant with LOW-S-standard rule<sup>[LOWS](https://github.com/bitcoin/bitcoin/pull/6769)</sup>:
+		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
+		//  - otherwise:
+		//    - MUST broadcast the corresponding closing transaction.
+		//  - MAY send another `closing_complete` (e.g. with a different `fee_satoshis` or `closer_scriptpubkey`).
 		unimplemented!("Handling ClosingSig is not implemented");
 	}
 
@@ -10425,10 +10474,10 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 	}
 
 	/// Check whether any channels have finished removing all pending updates after a shutdown
-	/// exchange and can now send a closing_signed.
-	/// Returns whether any closing_signed messages were generated.
-	#[rustfmt::skip]
-	fn maybe_generate_initial_closing_signed(&self) -> bool {
+	/// exchange and can now send a `closing_signed` or `closing_complete`.
+	///
+	/// Returns whether any closing messages were generated.
+	fn maybe_generate_initial_closing_message(&self) -> bool {
 		let mut handle_errors: Vec<(PublicKey, Result<(), _>)> = Vec::new();
 		let mut has_update = false;
 		let mut shutdown_results = Vec::new();
@@ -10442,40 +10491,127 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 				peer_state.channel_by_id.retain(|channel_id, chan| {
 					match chan.as_funded_mut() {
 						Some(funded_chan) => {
-							let logger = WithChannelContext::from(&self.logger, &funded_chan.context, None);
-							match funded_chan.maybe_propose_closing_signed(&self.fee_estimator, &&logger) {
-								Ok((msg_opt, tx_opt, shutdown_result_opt)) => {
-									if let Some(msg) = msg_opt {
-										has_update = true;
-										pending_msg_events.push(MessageSendEvent::SendClosingSigned {
-											node_id: funded_chan.context.get_counterparty_node_id(), msg,
-										});
-									}
-									debug_assert_eq!(shutdown_result_opt.is_some(), funded_chan.is_shutdown());
-									if let Some(mut shutdown_result) = shutdown_result_opt {
-										locked_close_channel!(self, peer_state, &funded_chan.context, shutdown_result);
-										shutdown_results.push(shutdown_result);
-									}
-									if let Some(tx) = tx_opt {
-										// We're done with this channel. We got a closing_signed and sent back
-										// a closing_signed with a closing transaction to broadcast.
-										if let Ok(update) = self.get_channel_update_for_broadcast(&funded_chan) {
-											let mut pending_broadcast_messages = self.pending_broadcast_messages.lock().unwrap();
-											pending_broadcast_messages.push(MessageSendEvent::BroadcastChannelUpdate {
-												msg: update
-											});
+							let logger =
+								WithChannelContext::from(&self.logger, &funded_chan.context, None);
+							if peer_state.latest_features.supports_simple_close() {
+								match funded_chan.maybe_propose_closing_complete(
+									&self.fee_estimator,
+									&peer_state.latest_features,
+									&&logger,
+								) {
+									Ok((msg_opt, shutdown_result_opt)) => {
+										if let Some(msg) = msg_opt {
+											has_update = true;
+											pending_msg_events.push(
+												MessageSendEvent::SendClosingComplete {
+													node_id: funded_chan
+														.context
+														.get_counterparty_node_id(),
+													msg,
+												},
+											);
 										}
+										debug_assert_eq!(
+											shutdown_result_opt.is_some(),
+											funded_chan.is_shutdown()
+										);
+										if let Some(mut shutdown_result) = shutdown_result_opt {
+											locked_close_channel!(
+												self,
+												peer_state,
+												&funded_chan.context,
+												shutdown_result
+											);
+											shutdown_results.push(shutdown_result);
+										}
+										true
+									},
+									Err(e) => {
+										has_update = true;
+										let (close_channel, res) = convert_channel_err!(
+											self,
+											peer_state,
+											e,
+											funded_chan,
+											channel_id,
+											FUNDED_CHANNEL
+										);
+										handle_errors.push((
+											funded_chan.context.get_counterparty_node_id(),
+											Err(res),
+										));
+										!close_channel
+									},
+								}
+							} else {
+								match funded_chan.maybe_propose_closing_signed(
+									&self.fee_estimator,
+									&peer_state.latest_features,
+									&&logger,
+								) {
+									Ok((msg_opt, tx_opt, shutdown_result_opt)) => {
+										if let Some(msg) = msg_opt {
+											has_update = true;
+											pending_msg_events.push(
+												MessageSendEvent::SendClosingSigned {
+													node_id: funded_chan
+														.context
+														.get_counterparty_node_id(),
+													msg,
+												},
+											);
+										}
+										debug_assert_eq!(
+											shutdown_result_opt.is_some(),
+											funded_chan.is_shutdown()
+										);
+										if let Some(mut shutdown_result) = shutdown_result_opt {
+											locked_close_channel!(
+												self,
+												peer_state,
+												&funded_chan.context,
+												shutdown_result
+											);
+											shutdown_results.push(shutdown_result);
+										}
+										if let Some(tx) = tx_opt {
+											// We're done with this channel. We got a closing_signed and sent back
+											// a closing_signed with a closing transaction to broadcast.
+											if let Ok(update) =
+												self.get_channel_update_for_broadcast(&funded_chan)
+											{
+												let mut pending_broadcast_messages =
+													self.pending_broadcast_messages.lock().unwrap();
+												pending_broadcast_messages.push(
+													MessageSendEvent::BroadcastChannelUpdate {
+														msg: update,
+													},
+												);
+											}
 
-										log_info!(logger, "Broadcasting {}", log_tx!(tx));
-										self.tx_broadcaster.broadcast_transactions(&[&tx]);
-										false
-									} else { true }
-								},
-								Err(e) => {
-									has_update = true;
-									let (close_channel, res) = convert_channel_err!(self, peer_state, e, funded_chan, channel_id, FUNDED_CHANNEL);
-									handle_errors.push((funded_chan.context.get_counterparty_node_id(), Err(res)));
-									!close_channel
+											log_info!(logger, "Broadcasting {}", log_tx!(tx));
+											self.tx_broadcaster.broadcast_transactions(&[&tx]);
+											false
+										} else {
+											true
+										}
+									},
+									Err(e) => {
+										has_update = true;
+										let (close_channel, res) = convert_channel_err!(
+											self,
+											peer_state,
+											e,
+											funded_chan,
+											channel_id,
+											FUNDED_CHANNEL
+										);
+										handle_errors.push((
+											funded_chan.context.get_counterparty_node_id(),
+											Err(res),
+										));
+										!close_channel
+									},
 								}
 							}
 						},
@@ -11882,7 +12018,7 @@ where
 			if self.check_free_holding_cells() {
 				result = NotifyOption::DoPersist;
 			}
-			if self.maybe_generate_initial_closing_signed() {
+			if self.maybe_generate_initial_closing_message() {
 				result = NotifyOption::DoPersist;
 			}
 
