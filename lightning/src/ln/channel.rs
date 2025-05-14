@@ -8860,7 +8860,175 @@ where
 		//  - MUST sign and broadcast the corresponding closing transaction.
 		//  - MUST send `closing_sig` with a single valid signature in the same TLV field as the `closing_complete`.
 		//  - MUST use `closer_scriptpubkey` for its own future `closing_complete` messages.
-		unimplemented!();
+		if !their_features.supports_simple_close() {
+			return Err(ChannelError::close(
+				"Remote end sent us a closing_complete for a legacy channel".to_owned(),
+			));
+		}
+		if !self.context.channel_state.is_both_sides_shutdown() {
+			return Err(ChannelError::close(
+				"Remote end sent us a closing_complete before both sides provided a shutdown"
+					.to_owned(),
+			));
+		}
+		if self.context.channel_state.is_peer_disconnected() {
+			return Err(ChannelError::close(
+				"Peer sent closing_complete when we needed a channel_reestablish".to_owned(),
+			));
+		}
+		if !self.context.pending_inbound_htlcs.is_empty()
+			|| !self.context.pending_outbound_htlcs.is_empty()
+		{
+			return Err(ChannelError::close(
+				"Remote end sent us a closing_complete while there were still pending HTLCs"
+					.to_owned(),
+			));
+		}
+		if msg.fee_satoshis > TOTAL_BITCOIN_SUPPLY_SATOSHIS {
+			// this is required to stop potential overflow in build_closing_transaction
+			return Err(ChannelError::close(
+				"Remote tried to send us a closing tx with > 21 million BTC fee".to_owned(),
+			));
+		}
+
+		if msg.fee_satoshis > self.get_available_balances(fee_estimator).inbound_capacity_msat {
+			//  - If `fee_satoshis` is greater than the closer's outstanding balance:
+			//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
+			return Err(ChannelError::Warn(
+				"Remote tried to send us a closing tx with fee higher than their balance"
+					.to_owned(),
+			));
+		}
+
+		if self.context.channel_state.is_monitor_update_in_progress() {
+			self.context.pending_counterparty_closing_complete = Some(msg.clone());
+			return Ok((None, None, None, None));
+		}
+
+		unimplemented!()
+		// ------
+		//let funding_redeemscript = self.funding.get_funding_redeemscript();
+		//let mut skip_remote_output = false;
+		//let (mut closing_tx, used_total_fee) = self.build_closing_transaction(msg.fee_satoshis, skip_remote_output)?;
+		//if used_total_fee != msg.fee_satoshis {
+		//	return Err(ChannelError::close(format!("Remote sent us a closing_signed with a fee other than the value they can claim. Fee in message: {}. Actual closing tx fee: {}", msg.fee_satoshis, used_total_fee)));
+		//}
+		//let sighash = closing_tx.trust().get_sighash_all(&funding_redeemscript, self.funding.get_value_satoshis());
+
+		//match self.context.secp_ctx.verify_ecdsa(&sighash, &msg.signature, &self.funding.get_counterparty_pubkeys().funding_pubkey) {
+		//	Ok(_) => {},
+		//	Err(_e) => {
+		//		// The remote end may have decided to revoke their output due to inconsistent dust
+		//		// limits, so check for that case by re-checking the signature here.
+		//		skip_remote_output = true;
+		//		closing_tx = self.build_closing_transaction(msg.fee_satoshis, skip_remote_output)?.0;
+		//		let sighash = closing_tx.trust().get_sighash_all(&funding_redeemscript, self.funding.get_value_satoshis());
+		//		secp_check!(self.context.secp_ctx.verify_ecdsa(&sighash, &msg.signature, self.funding.counterparty_funding_pubkey()), "Invalid closing tx signature from peer".to_owned());
+		//	},
+		//};
+
+		//for outp in closing_tx.trust().built_transaction().output.iter() {
+		//	if !outp.script_pubkey.is_witness_program() && outp.value < Amount::from_sat(MAX_STD_OUTPUT_DUST_LIMIT_SATOSHIS) {
+		//		return Err(ChannelError::close("Remote sent us a closing_signed with a dust output. Always use segwit closing scripts!".to_owned()));
+		//	}
+		//}
+
+		//assert!(self.context.shutdown_scriptpubkey.is_some());
+		//if let Some((last_fee, _, _, Some(sig))) = self.context.last_sent_closing_fee {
+		//	if last_fee == msg.fee_satoshis {
+		//		let shutdown_result = self.shutdown_result_coop_close();
+		//		let tx = self.build_signed_closing_transaction(&mut closing_tx, &msg.signature, &sig);
+		//		self.context.channel_state = ChannelState::ShutdownComplete;
+		//		self.context.update_time_counter += 1;
+		//		return Ok((None, Some(tx), Some(shutdown_result)));
+		//	}
+		//}
+
+		//let (our_min_fee, our_max_fee) = self.calculate_closing_fee_limits(fee_estimator);
+
+		//macro_rules! propose_fee {
+		//	($new_fee: expr) => {
+		//		let (closing_tx, used_fee) = if $new_fee == msg.fee_satoshis {
+		//			(closing_tx, $new_fee)
+		//		} else {
+		//			skip_remote_output = false;
+		//			self.build_closing_transaction($new_fee, skip_remote_output)?
+		//		};
+
+		//		let closing_signed = self.get_closing_signed_msg(&closing_tx, skip_remote_output, used_fee, our_min_fee, our_max_fee, logger);
+		//		let (signed_tx, shutdown_result) = if $new_fee == msg.fee_satoshis {
+		//			let shutdown_result = closing_signed.as_ref()
+		//				.map(|_| self.shutdown_result_coop_close());
+		//			if closing_signed.is_some() {
+		//				self.context.channel_state = ChannelState::ShutdownComplete;
+		//			}
+		//			self.context.update_time_counter += 1;
+		//			self.context.last_received_closing_sig = Some(msg.signature.clone());
+		//			let tx = closing_signed.as_ref().map(|ClosingSigned { signature, .. }|
+		//				self.build_signed_closing_transaction(&closing_tx, &msg.signature, signature));
+		//			(tx, shutdown_result)
+		//		} else {
+		//			(None, None)
+		//		};
+		//		return Ok((closing_signed, signed_tx, shutdown_result))
+		//	}
+		//}
+
+		//if let Some(msgs::ClosingSignedFeeRange { min_fee_satoshis, max_fee_satoshis }) = msg.fee_range {
+		//	if msg.fee_satoshis < min_fee_satoshis || msg.fee_satoshis > max_fee_satoshis {
+		//		return Err(ChannelError::close(format!("Peer sent a bogus closing_signed - suggested fee of {} sat was not in their desired range of {} sat - {} sat", msg.fee_satoshis, min_fee_satoshis, max_fee_satoshis)));
+		//	}
+		//	if max_fee_satoshis < our_min_fee {
+		//		return Err(ChannelError::Warn(format!("Unable to come to consensus about closing feerate, remote's max fee ({} sat) was smaller than our min fee ({} sat)", max_fee_satoshis, our_min_fee)));
+		//	}
+		//	if min_fee_satoshis > our_max_fee {
+		//		return Err(ChannelError::Warn(format!("Unable to come to consensus about closing feerate, remote's min fee ({} sat) was greater than our max fee ({} sat)", min_fee_satoshis, our_max_fee)));
+		//	}
+
+		//	if !self.funding.is_outbound() {
+		//		// They have to pay, so pick the highest fee in the overlapping range.
+		//		// We should never set an upper bound aside from their full balance
+		//		debug_assert_eq!(our_max_fee, self.funding.get_value_satoshis() - (self.funding.value_to_self_msat + 999) / 1000);
+		//		propose_fee!(cmp::min(max_fee_satoshis, our_max_fee));
+		//	} else {
+		//		if msg.fee_satoshis < our_min_fee || msg.fee_satoshis > our_max_fee {
+		//			return Err(ChannelError::close(format!("Peer sent a bogus closing_signed - suggested fee of {} sat was not in our desired range of {} sat - {} sat after we informed them of our range.",
+		//				msg.fee_satoshis, our_min_fee, our_max_fee)));
+		//		}
+		//		// The proposed fee is in our acceptable range, accept it and broadcast!
+		//		propose_fee!(msg.fee_satoshis);
+		//	}
+		//} else {
+		//	// Old fee style negotiation. We don't bother to enforce whether they are complying
+		//	// with the "making progress" requirements, we just comply and hope for the best.
+		//	if let Some((last_fee, _, _, _)) = self.context.last_sent_closing_fee {
+		//		if msg.fee_satoshis > last_fee {
+		//			if msg.fee_satoshis < our_max_fee {
+		//				propose_fee!(msg.fee_satoshis);
+		//			} else if last_fee < our_max_fee {
+		//				propose_fee!(our_max_fee);
+		//			} else {
+		//				return Err(ChannelError::close(format!("Unable to come to consensus about closing feerate, remote wants something ({} sat) higher than our max fee ({} sat)", msg.fee_satoshis, our_max_fee)));
+		//			}
+		//		} else {
+		//			if msg.fee_satoshis > our_min_fee {
+		//				propose_fee!(msg.fee_satoshis);
+		//			} else if last_fee > our_min_fee {
+		//				propose_fee!(our_min_fee);
+		//			} else {
+		//				return Err(ChannelError::close(format!("Unable to come to consensus about closing feerate, remote wants something ({} sat) lower than our min fee ({} sat)", msg.fee_satoshis, our_min_fee)));
+		//			}
+		//		}
+		//	} else {
+		//		if msg.fee_satoshis < our_min_fee {
+		//			propose_fee!(our_min_fee);
+		//		} else if msg.fee_satoshis > our_max_fee {
+		//			propose_fee!(our_max_fee);
+		//		} else {
+		//			propose_fee!(msg.fee_satoshis);
+		//		}
+		//	}
+		//}
 	}
 
 	#[rustfmt::skip]
