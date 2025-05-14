@@ -2216,8 +2216,17 @@ where
 
 	/// If our counterparty sent us a closing_signed while we were waiting for a `ChannelMonitor`
 	/// update, we need to delay processing it until later. We do that here by simply storing the
-	/// closing_signed message and handling it in `maybe_propose_closing_signed`.
+	/// closing_signed message and handling it in [`maybe_propose_closing_signed`].
+	///
+	/// [`maybe_propose_closing_signed`]: Channel::maybe_propose_closing_signed
 	pending_counterparty_closing_signed: Option<msgs::ClosingSigned>,
+
+	/// If our counterparty sent us a closing_complete while we were waiting for a `ChannelMonitor`
+	/// update, we need to delay processing it until later. We do that here by simply storing the
+	/// closing_complete message and handling it in [`maybe_propose_closing_complete`].
+	///
+	/// [`maybe_propose_closing_complete`]: Channel::maybe_propose_closing_complete
+	pending_counterparty_closing_complete: Option<msgs::ClosingComplete>,
 
 	/// The minimum and maximum absolute fee, in satoshis, we are willing to place on the closing
 	/// transaction. These are set once we reach `closing_negotiation_ready`.
@@ -3147,6 +3156,7 @@ where
 			last_sent_closing_fee: None,
 			last_received_closing_sig: None,
 			pending_counterparty_closing_signed: None,
+			pending_counterparty_closing_complete: None,
 			expecting_peer_commitment_signed: false,
 			closing_fee_limits: None,
 			target_closing_feerate_sats_per_kw: None,
@@ -3386,6 +3396,7 @@ where
 			last_sent_closing_fee: None,
 			last_received_closing_sig: None,
 			pending_counterparty_closing_signed: None,
+			pending_counterparty_closing_complete: None,
 			expecting_peer_commitment_signed: false,
 			closing_fee_limits: None,
 			target_closing_feerate_sats_per_kw: None,
@@ -7301,6 +7312,7 @@ where
 		// will be retransmitted.
 		self.context.last_sent_closing_fee = None;
 		self.context.pending_counterparty_closing_signed = None;
+		self.context.pending_counterparty_closing_complete = None;
 		self.context.closing_fee_limits = None;
 
 		let mut inbound_drop_count = 0;
@@ -8133,10 +8145,11 @@ where
 		self.context.closing_fee_limits.clone().unwrap()
 	}
 
-	/// Returns true if we're ready to commence the closing_signed negotiation phase. This is true
-	/// after both sides have exchanged a `shutdown` message and all HTLCs have been drained. At
-	/// this point if we're the funder we should send the initial closing_signed, and in any case
-	/// shutdown should complete within a reasonable timeframe.
+	/// Returns true if we're ready to commence the closing negotiation phase. This is true after
+	/// both sides have exchanged a `shutdown` message and all HTLCs have been drained. At this
+	/// point we should send the initial closing_signed (if it's a legacy close and we're the
+	/// funder), or closing_complete (for option_simple_close), and in any case shutdown should
+	/// complete within a reasonable timeframe.
 	fn closing_negotiation_ready(&self) -> bool {
 		self.context.closing_negotiation_ready()
 	}
@@ -8211,7 +8224,15 @@ where
 	pub fn maybe_propose_closing_complete<F: Deref, L: Deref>(
 		&mut self, fee_estimator: &LowerBoundedFeeEstimator<F>, their_features: &InitFeatures,
 		logger: &L,
-	) -> Result<(Option<msgs::ClosingComplete>, Option<ShutdownResult>), ChannelError>
+	) -> Result<
+		(
+			Option<msgs::ClosingComplete>,
+			Option<msgs::ClosingSig>,
+			Option<Transaction>,
+			Option<ShutdownResult>,
+		),
+		ChannelError,
+	>
 	where
 		F::Target: FeeEstimator,
 		L::Target: Logger,
@@ -8244,7 +8265,39 @@ where
 		//  - If it wants to send another `closing_complete` (e.g. with a different `fee_satoshis` or `closer_scriptpubkey`):
 		//    - MUST wait until it has received `closing_sig` first.
 		//    - SHOULD close the connection if it doesn't receive `closing_sig`.
-		unimplemented!("Sending initial ClosingComplete is not implemented");
+
+		// If we're waiting on a monitor persistence, that implies we're also waiting to send some
+		// message to our counterparty (probably a `revoke_and_ack`). In such a case, we shouldn't
+		// initiate `closing_complete` negotiation until we're clear of all pending messages. Note
+		// that closing_negotiation_ready checks this case (as well as a few others).
+		if !self.closing_negotiation_ready() {
+			return Ok((None, None, None, None));
+		}
+
+		if let Some(msg) = &self.context.pending_counterparty_closing_complete.take() {
+			return self.closing_complete(fee_estimator, their_features, &msg, logger);
+		}
+
+		// If we're waiting on a counterparty `commitment_signed` to clear some updates from our
+		// local commitment transaction, we can't yet initiate `closing_complete` negotiation.
+		if self.context.expecting_peer_commitment_signed {
+			return Ok((None, None, None, None));
+		}
+
+		let (our_min_fee, _) = self.calculate_closing_fee_limits(fee_estimator);
+
+		assert!(self.context.shutdown_scriptpubkey.is_some());
+		let (closing_tx, total_fee_satoshis) =
+			self.build_closing_transaction(our_min_fee, false)?;
+		log_trace!(
+			logger,
+			"Proposing initial closing_complete for our counterparty with fee of {} sats)",
+			total_fee_satoshis
+		);
+
+		let closing_complete =
+			self.get_closing_complete_msg(&closing_tx, false, false, total_fee_satoshis, logger);
+		Ok((closing_complete, None, None, None))
 	}
 
 	fn mark_response_received(&mut self) {
@@ -8477,6 +8530,45 @@ where
 			fee_satoshis,
 			signature,
 			fee_range: Some(fee_range),
+		})
+	}
+
+	fn get_closing_complete_msg<L: Deref>(
+		&mut self, closing_tx: &ClosingTransaction, skip_local_output: bool,
+		skip_remote_output: bool, fee_satoshis: u64, logger: &L,
+	) -> Option<msgs::ClosingComplete>
+	where
+		L::Target: Logger,
+	{
+		let sig = match &self.context.holder_signer {
+			ChannelSignerType::Ecdsa(ecdsa) => ecdsa
+				.sign_closing_transaction(
+					&self.funding.channel_transaction_parameters,
+					closing_tx,
+					&self.context.secp_ctx,
+				)
+				.ok(),
+		};
+
+		if sig.is_none() {
+			log_trace!(logger, "Closing transaction signature unavailable, waiting on signer");
+			self.context.signer_pending_closing = true;
+		} else {
+			self.context.signer_pending_closing = false;
+		}
+
+		// TODO: how to update/refactor this?:
+		//self.context.last_sent_closing_fee = Some((fee_satoshis, skip_remote_output, fee_range.clone(), sig.clone()));
+		sig.map(|signature| msgs::ClosingComplete {
+			channel_id: self.context.channel_id,
+			fee_satoshis,
+			closer_scriptpubkey: self.get_closing_scriptpubkey(),
+			closee_scriptpubkey: self.context.counterparty_shutdown_scriptpubkey.clone().unwrap(),
+			locktime: LockTime::ZERO.to_consensus_u32(), // TODO: double-check if we want this
+			// TODO: set right signatures
+			closer_output_only: None,
+			closee_output_only: None,
+			closer_and_closee_outputs: None,
 		})
 	}
 
@@ -8718,6 +8810,25 @@ where
 				}
 			}
 		}
+	}
+
+	pub fn closing_complete<F: Deref, L: Deref>(
+		&mut self, fee_estimator: &LowerBoundedFeeEstimator<F>, their_features: &InitFeatures,
+		msg: &msgs::ClosingComplete, logger: &L,
+	) -> Result<
+		(
+			Option<msgs::ClosingComplete>,
+			Option<msgs::ClosingSig>,
+			Option<Transaction>,
+			Option<ShutdownResult>,
+		),
+		ChannelError,
+	>
+	where
+		F::Target: FeeEstimator,
+		L::Target: Logger,
+	{
+		unimplemented!();
 	}
 
 	#[rustfmt::skip]
@@ -12454,6 +12565,7 @@ where
 				last_sent_closing_fee: None,
 				last_received_closing_sig: None,
 				pending_counterparty_closing_signed: None,
+				pending_counterparty_closing_complete: None,
 				expecting_peer_commitment_signed: false,
 				closing_fee_limits: None,
 				target_closing_feerate_sats_per_kw,

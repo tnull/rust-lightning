@@ -10499,11 +10499,28 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 									&peer_state.latest_features,
 									&&logger,
 								) {
-									Ok((msg_opt, shutdown_result_opt)) => {
-										if let Some(msg) = msg_opt {
+									Ok((
+										complete_msg_opt,
+										sig_msg_opt,
+										tx_opt,
+										shutdown_result_opt,
+									)) => {
+										if let Some(msg) = complete_msg_opt {
 											has_update = true;
 											pending_msg_events.push(
 												MessageSendEvent::SendClosingComplete {
+													node_id: funded_chan
+														.context
+														.get_counterparty_node_id(),
+													msg,
+												},
+											);
+										}
+
+										if let Some(msg) = sig_msg_opt {
+											has_update = true;
+											pending_msg_events.push(
+												MessageSendEvent::SendClosingSig {
 													node_id: funded_chan
 														.context
 														.get_counterparty_node_id(),
@@ -10524,7 +10541,27 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 											);
 											shutdown_results.push(shutdown_result);
 										}
-										true
+										if let Some(tx) = tx_opt {
+											// We're done with this channel. We got a closing_signed and sent back
+											// a closing_signed with a closing transaction to broadcast.
+											if let Ok(update) =
+												self.get_channel_update_for_broadcast(&funded_chan)
+											{
+												let mut pending_broadcast_messages =
+													self.pending_broadcast_messages.lock().unwrap();
+												pending_broadcast_messages.push(
+													MessageSendEvent::BroadcastChannelUpdate {
+														msg: update,
+													},
+												);
+											}
+
+											log_info!(logger, "Broadcasting {}", log_tx!(tx));
+											self.tx_broadcaster.broadcast_transactions(&[&tx]);
+											false
+										} else {
+											true
+										}
 									},
 									Err(e) => {
 										has_update = true;
