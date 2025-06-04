@@ -8828,6 +8828,38 @@ where
 		F::Target: FeeEstimator,
 		L::Target: Logger,
 	{
+		// The receiver of `closing_complete` (aka. "the closee"):
+		//  - If `fee_satoshis` is greater than the closer's outstanding balance:
+		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
+		//  - If `closee_scriptpubkey` does not match the last script it sent (from `closing_complete` or from the initial `shutdown`):
+		//    - SHOULD ignore `closing_complete`.
+		//    - SHOULD send a `warning`.
+		//    - SHOULD close the connection.
+		//  - If `closer_scriptpubkey` is invalid (as detailed in the [`shutdown` requirements](#closing-initiation-shutdown)):
+		//    - SHOULD ignore `closing_complete`.
+		//    - SHOULD send a `warning`.
+		//    - SHOULD close the connection.
+		//  - If `closer_scriptpubkey` is a valid `OP_RETURN` script:
+		//    - MUST set the closer's output amount to zero so that all funds go to fees, as specified in [BOLT #3](03-transactions.md#closing-transaction).
+		//  - MUST generate the remote closing transaction as specified in [BOLT #3](03-transactions.md#closing-transaction).
+		//  - Select a signature for validation:
+		//    - If the local output amount is dust:
+		//      - MUST use `closer_output_only`.
+		//    - Otherwise, if it considers the local output amount uneconomical AND its `closee_scriptpubkey` is not `OP_RETURN`:
+		//      - MUST use `closer_output_only`.
+		//    - Otherwise, if `closer_and_closee_outputs` is present:
+		//      - MUST use `closer_and_closee_outputs`.
+		//    - Otherwise:
+		//      - MUST use `closee_output_only`.
+		//  - If the selected signature field does not exist:
+		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
+		//  - If the signature field is not valid for the corresponding closing transaction specified in [BOLT #3](03-transactions.md#closing-transaction):
+		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
+		//  - If the signature field is non-compliant with LOW-S-standard rule<sup>[LOWS](https://github.com/bitcoin/bitcoin/pull/6769)</sup>:
+		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
+		//  - MUST sign and broadcast the corresponding closing transaction.
+		//  - MUST send `closing_sig` with a single valid signature in the same TLV field as the `closing_complete`.
+		//  - MUST use `closer_scriptpubkey` for its own future `closing_complete` messages.
 		unimplemented!();
 	}
 

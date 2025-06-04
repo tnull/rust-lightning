@@ -9356,41 +9356,96 @@ This indicates a bug inside LDK. Please report this error at https://github.com/
 	}
 
 	fn internal_closing_complete(
-		&self, _counterparty_node_id: PublicKey, _msg: msgs::ClosingComplete,
+		&self, counterparty_node_id: PublicKey, msg: msgs::ClosingComplete,
 	) -> Result<(), MsgHandleErrInternal> {
-		// The receiver of `closing_complete` (aka. "the closee"):
-		//  - If `fee_satoshis` is greater than the closer's outstanding balance:
-		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
-		//  - If `closee_scriptpubkey` does not match the last script it sent (from `closing_complete` or from the initial `shutdown`):
-		//    - SHOULD ignore `closing_complete`.
-		//    - SHOULD send a `warning`.
-		//    - SHOULD close the connection.
-		//  - If `closer_scriptpubkey` is invalid (as detailed in the [`shutdown` requirements](#closing-initiation-shutdown)):
-		//    - SHOULD ignore `closing_complete`.
-		//    - SHOULD send a `warning`.
-		//    - SHOULD close the connection.
-		//  - If `closer_scriptpubkey` is a valid `OP_RETURN` script:
-		//    - MUST set the closer's output amount to zero so that all funds go to fees, as specified in [BOLT #3](03-transactions.md#closing-transaction).
-		//  - MUST generate the remote closing transaction as specified in [BOLT #3](03-transactions.md#closing-transaction).
-		//  - Select a signature for validation:
-		//    - If the local output amount is dust:
-		//      - MUST use `closer_output_only`.
-		//    - Otherwise, if it considers the local output amount uneconomical AND its `closee_scriptpubkey` is not `OP_RETURN`:
-		//      - MUST use `closer_output_only`.
-		//    - Otherwise, if `closer_and_closee_outputs` is present:
-		//      - MUST use `closer_and_closee_outputs`.
-		//    - Otherwise:
-		//      - MUST use `closee_output_only`.
-		//  - If the selected signature field does not exist:
-		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
-		//  - If the signature field is not valid for the corresponding closing transaction specified in [BOLT #3](03-transactions.md#closing-transaction):
-		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
-		//  - If the signature field is non-compliant with LOW-S-standard rule<sup>[LOWS](https://github.com/bitcoin/bitcoin/pull/6769)</sup>:
-		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
-		//  - MUST sign and broadcast the corresponding closing transaction.
-		//  - MUST send `closing_sig` with a single valid signature in the same TLV field as the `closing_complete`.
-		//  - MUST use `closer_scriptpubkey` for its own future `closing_complete` messages.
-		unimplemented!("Handling ClosingComplete is not implemented");
+		let per_peer_state = self.per_peer_state.read().unwrap();
+		let peer_state_mutex = per_peer_state.get(&counterparty_node_id).ok_or_else(|| {
+			debug_assert!(false);
+			MsgHandleErrInternal::send_err_msg_no_close(
+				format!(
+					"Can't find a peer matching the passed counterparty node_id {}",
+					counterparty_node_id
+				),
+				msg.channel_id,
+			)
+		})?;
+		let (tx_opt, chan_opt, shutdown_result) = {
+			let mut peer_state_lock = peer_state_mutex.lock().unwrap();
+			let peer_state = &mut *peer_state_lock;
+			match peer_state.channel_by_id.entry(msg.channel_id.clone()) {
+				hash_map::Entry::Occupied(mut chan_entry) => {
+					if let Some(chan) = chan_entry.get_mut().as_funded_mut() {
+						let logger = WithChannelContext::from(&self.logger, &chan.context, None);
+						let (closing_complete_opt, closing_sig_opt, tx_opt, shutdown_result) = try_channel_entry!(self, peer_state,
+							chan.closing_complete(&self.fee_estimator, &peer_state.latest_features, &msg, &&logger),
+							chan_entry
+						);
+						debug_assert_eq!(shutdown_result.is_some(), chan.is_shutdown());
+						if let Some(msg) = closing_complete_opt {
+							peer_state.pending_msg_events.push(MessageSendEvent::SendClosingComplete {
+								node_id: counterparty_node_id.clone(),
+								msg,
+							});
+						}
+						if let Some(msg) = closing_sig_opt {
+							peer_state.pending_msg_events.push(MessageSendEvent::SendClosingSig {
+								node_id: counterparty_node_id.clone(),
+								msg,
+							});
+						}
+
+						if let Some(mut close_res) = shutdown_result {
+							// We're done with this channel, we've got a signed closing transaction and
+							// will send the closing_sig back to the remote peer upon return. This
+							// also implies there are no pending HTLCs left on the channel, so we can
+							// fully delete it from tracking (the channel monitor is still around to
+							// watch for old state broadcasts)!
+							debug_assert!(tx_opt.is_some());
+							let channel = remove_channel_entry!(self, peer_state, chan_entry, close_res);
+							(tx_opt, Some(channel), Some(close_res))
+						} else {
+							debug_assert!(tx_opt.is_none());
+							(tx_opt, None, None)
+						}
+					} else {
+						return try_channel_entry!(self, peer_state, Err(ChannelError::close(
+							"Got a closing_complete message for an unfunded channel!".into())), chan_entry);
+					}
+				},
+				hash_map::Entry::Vacant(_) => return Err(
+					MsgHandleErrInternal::send_err_msg_no_close(format!(
+						"Got a message for a channel from the wrong node! No such channel for the passed counterparty_node_id {}",
+						counterparty_node_id), msg.channel_id)
+					)
+			}
+		};
+
+		if let Some(broadcast_tx) = tx_opt {
+			let channel_id = chan_opt.as_ref().map(|channel| channel.context().channel_id());
+			log_info!(
+				WithContext::from(&self.logger, Some(counterparty_node_id), channel_id, None),
+				"Broadcasting {}",
+				log_tx!(broadcast_tx)
+			);
+			self.tx_broadcaster.broadcast_transactions(&[&broadcast_tx]);
+		}
+
+		if let Some(chan) = chan_opt.as_ref().and_then(Channel::as_funded) {
+			if let Ok(update) = self.get_channel_update_for_broadcast(chan) {
+				let mut pending_broadcast_messages =
+					self.pending_broadcast_messages.lock().unwrap();
+				pending_broadcast_messages
+					.push(MessageSendEvent::BroadcastChannelUpdate { msg: update });
+			}
+		}
+
+		mem::drop(per_peer_state);
+
+		if let Some(shutdown_result) = shutdown_result {
+			self.finish_close_channel(shutdown_result);
+		}
+
+		Ok(())
 	}
 
 	fn internal_closing_sig(
