@@ -9031,6 +9031,31 @@ where
 		//}
 	}
 
+	pub fn closing_sig<F: Deref, L: Deref>(
+		&mut self, fee_estimator: &LowerBoundedFeeEstimator<F>, their_features: &InitFeatures,
+		msg: &msgs::ClosingSig, logger: &L,
+	) -> Result<(Option<Transaction>, Option<ShutdownResult>), ChannelError>
+	where
+		F::Target: FeeEstimator,
+		L::Target: Logger,
+	{
+		// The receiver of `closing_sig`:
+		//  - If `closer_scriptpubkey`, `closee_scriptpubkey`, `fee_satoshis` or `locktime` don't match what was sent in `closing_complete`:
+		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
+		//  - If `tlvs` does not contain exactly one signature:
+		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
+		//  - If `tlvs` does not contain one of the TLV fields sent in `closing_complete`:
+		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
+		//  - If the signature field is not valid for the corresponding closing transaction specified in [BOLT #3](03-transactions.md#closing-transaction):
+		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
+		//  - If the signature field is non-compliant with LOW-S-standard rule<sup>[LOWS](https://github.com/bitcoin/bitcoin/pull/6769)</sup>:
+		//    - MUST either send a `warning` and close the connection, or send an `error` and fail the channel.
+		//  - otherwise:
+		//    - MUST broadcast the corresponding closing transaction.
+		//  - MAY send another `closing_complete` (e.g. with a different `fee_satoshis` or `closer_scriptpubkey`).
+		unimplemented!();
+	}
+
 	#[rustfmt::skip]
 	fn internal_htlc_satisfies_config(
 		&self, htlc: &msgs::UpdateAddHTLC, amt_to_forward: u64, outgoing_cltv_value: u32, config: &ChannelConfig,
