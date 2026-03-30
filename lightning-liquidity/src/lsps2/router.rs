@@ -44,9 +44,9 @@ pub struct LSPS2Bolt12InvoiceParameters {
 }
 
 /// A router wrapper that injects LSPS2-specific BOLT12 blinded paths for registered offer ids
-/// while delegating all other routing behavior to the inner routers.
+/// while delegating all other blinded path creation behaviors to the inner routers.
 ///
-/// For **payment** blinded paths (in invoices), it injects the intercept SCID as the forwarding
+/// For **payment** blinded paths (in invoices), it returns the intercept SCID as the forwarding
 /// hop so that the LSP can intercept the HTLC and open a JIT channel.
 ///
 /// For **message** blinded paths (in offers), it injects the intercept SCID as the
@@ -208,27 +208,18 @@ impl<R: Router, MR: MessageRouter, ES: EntropySource + Send + Sync> MessageRoute
 
 	fn create_blinded_paths<T: secp256k1::Signing + secp256k1::Verification>(
 		&self, recipient: PublicKey, local_node_receive_key: ReceiveAuthKey,
-		context: MessageContext, peers: Vec<MessageForwardNode>, secp_ctx: &Secp256k1<T>,
+		context: MessageContext, mut peers: Vec<MessageForwardNode>, secp_ctx: &Secp256k1<T>,
 	) -> Result<Vec<BlindedMessagePath>, ()> {
-		// Inject intercept SCIDs to have the payer use them when sending HTLCs, prompting the LSP
-		// node to emit Event::HTLCIntercepted and hence trigger channel open
-		let peers = match &context {
-			MessageContext::Offers(OffersContext::InvoiceRequest { .. }) => {
-				let params = self.offer_to_invoice_params.lock().unwrap();
-				peers
-					.into_iter()
-					.map(|mut peer| {
-						if let Some(p) =
-							params.values().find(|p| p.counterparty_node_id == peer.node_id)
-						{
-							peer.short_channel_id = Some(p.intercept_scid);
-						}
-						peer
-					})
-					.collect()
-			},
-			_ => peers,
-		};
+		// Override with intercept SCIDs to have the payer use them when sending HTLCs, prompting
+		// the LSP node to emit Event::HTLCIntercepted and hence trigger channel open
+		if matches!(&context, MessageContext::Offers(OffersContext::InvoiceRequest { .. })) {
+			let params = self.offer_to_invoice_params.lock().unwrap();
+			for peer in &mut peers {
+				if let Some(p) = params.values().find(|p| p.counterparty_node_id == peer.node_id) {
+					peer.short_channel_id = Some(p.intercept_scid);
+				}
+			}
+		}
 
 		self.inner_message_router.create_blinded_paths(
 			recipient,
