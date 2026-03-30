@@ -1676,7 +1676,7 @@ impl<
 						});
 						return Ok(());
 					}
-					log_trace!(self.logger, "Dropping forwarded onion messager: unable to resolve next hop using SCID {} {}", scid, log_suffix);
+					log_trace!(self.logger, "Dropping forwarded onion message: unable to resolve next hop using SCID {} {}", scid, log_suffix);
 					return Err(SendError::GetNodeIdFailed);
 				},
 			},
