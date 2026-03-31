@@ -139,6 +139,8 @@ impl<R: Router, MR: MessageRouter, ES: EntropySource + Send + Sync> Router
 		first_hops: Vec<ChannelDetails>, tlvs: ReceiveTlvs, amount_msats: Option<u64>,
 		secp_ctx: &Secp256k1<T>,
 	) -> Result<Vec<BlindedPaymentPath>, ()> {
+		// Override with intercept SCIDs to have the payer use them when sending payments,
+		// prompting the LSP node to emit Event::HTLCIntercepted, hence triggering channel open.
 		let lsps2_invoice_params = match self.registered_lsps2_params(&tlvs.payment_context) {
 			Some(params) => params,
 			None => {
@@ -210,8 +212,10 @@ impl<R: Router, MR: MessageRouter, ES: EntropySource + Send + Sync> MessageRoute
 		&self, recipient: PublicKey, local_node_receive_key: ReceiveAuthKey,
 		context: MessageContext, mut peers: Vec<MessageForwardNode>, secp_ctx: &Secp256k1<T>,
 	) -> Result<Vec<BlindedMessagePath>, ()> {
-		// Override with intercept SCIDs to have the payer use them when sending HTLCs, prompting
-		// the LSP node to emit Event::HTLCIntercepted and hence trigger channel open
+		// Override with intercept SCIDs to have the payer use them when sending invoice requests,
+		// prompting the LSP node to emit Event::OnionMessageIntercepted, allowing it to then use
+		// the Router implementation above to also override the blinded payment paths with the
+		// intercept SCID, hence triggering channel open.
 		if matches!(&context, MessageContext::Offers(OffersContext::InvoiceRequest { .. })) {
 			let params = self.offer_to_invoice_params.lock().unwrap();
 			for peer in &mut peers {
