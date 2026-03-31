@@ -1584,6 +1584,7 @@ fn reject_bad_payment_secret() {
 						PaymentContext::AsyncBolt12Offer(AsyncBolt12OfferContext {
 							// We don't reach the point of checking the invreq nonce due to the invalid payment secret
 							offer_nonce: Nonce([i; Nonce::LENGTH]),
+							offer_id: None,
 						}),
 						u32::MAX,
 					)
@@ -3117,7 +3118,8 @@ fn intercepted_hold_htlc() {
 	.unwrap();
 	let mut offer_nonce = Nonce([0; Nonce::LENGTH]);
 	offer_nonce.0.copy_from_slice(&hardcoded_random_bytes[..Nonce::LENGTH]);
-	let payment_context = PaymentContext::AsyncBolt12Offer(AsyncBolt12OfferContext { offer_nonce });
+	let payment_context =
+		PaymentContext::AsyncBolt12Offer(AsyncBolt12OfferContext { offer_nonce, offer_id: None });
 	let blinded_payment_path_with_jit_channel_scid = recipient
 		.node
 		.flow

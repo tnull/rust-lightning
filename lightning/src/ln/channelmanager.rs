@@ -8499,7 +8499,7 @@ impl<
 						},
 						OnionPayload::Spontaneous(keysend_preimage) => {
 							let purpose = if let Some(PaymentContext::AsyncBolt12Offer(
-								AsyncBolt12OfferContext { offer_nonce },
+								AsyncBolt12OfferContext { offer_nonce, .. },
 							)) = payment_context
 							{
 								let payment_data = match payment_data {

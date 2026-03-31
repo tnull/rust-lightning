@@ -20,8 +20,8 @@ use lightning::blinded_path::message::{
 	BlindedMessagePath, MessageContext, MessageForwardNode, OffersContext,
 };
 use lightning::blinded_path::payment::{
-	BlindedPaymentPath, Bolt12OfferContext, ForwardTlvs, PaymentConstraints, PaymentContext,
-	PaymentForwardNode, PaymentRelay, ReceiveTlvs,
+	AsyncBolt12OfferContext, BlindedPaymentPath, Bolt12OfferContext, ForwardTlvs,
+	PaymentConstraints, PaymentContext, PaymentForwardNode, PaymentRelay, ReceiveTlvs,
 };
 use lightning::ln::channel_state::ChannelDetails;
 use lightning::ln::channelmanager::{PaymentId, MIN_FINAL_CLTV_EXPIRY_DELTA};
@@ -98,14 +98,16 @@ impl<R: Router, MR: MessageRouter, ES: EntropySource + Send + Sync> LSPS2BOLT12R
 	fn registered_lsps2_params(
 		&self, payment_context: &PaymentContext,
 	) -> Option<LSPS2Bolt12InvoiceParameters> {
-		// We intentionally only match `Bolt12Offer` here and not `AsyncBolt12Offer`, as LSPS2
-		// JIT channels are not applicable to async (always-online) BOLT12 offer flows.
-		let Bolt12OfferContext { offer_id, .. } = match payment_context {
-			PaymentContext::Bolt12Offer(context) => context,
+		let offer_id = match payment_context {
+			PaymentContext::Bolt12Offer(Bolt12OfferContext { offer_id, .. }) => *offer_id,
+			PaymentContext::AsyncBolt12Offer(AsyncBolt12OfferContext {
+				offer_id: Some(offer_id),
+				..
+			}) => *offer_id,
 			_ => return None,
 		};
 
-		self.offer_to_invoice_params.lock().unwrap().get(offer_id).copied()
+		self.offer_to_invoice_params.lock().unwrap().get(&offer_id).copied()
 	}
 }
 

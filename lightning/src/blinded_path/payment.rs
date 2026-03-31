@@ -527,6 +527,12 @@ pub struct AsyncBolt12OfferContext {
 	///
 	/// [`InvoiceRequest`]: crate::offers::invoice_request::InvoiceRequest
 	pub offer_nonce: Nonce,
+	/// The [`OfferId`] used to identify the [`Offer`] from which the [`StaticInvoice`] was
+	/// requested.
+	///
+	/// [`Offer`]: crate::offers::offer::Offer
+	/// [`StaticInvoice`]: crate::offers::static_invoice::StaticInvoice
+	pub offer_id: Option<OfferId>,
 }
 
 /// The context of a payment made for an invoice sent for a BOLT 12 [`Refund`].
@@ -957,6 +963,7 @@ impl_writeable_tlv_based!(Bolt12OfferContext, {
 
 impl_writeable_tlv_based!(AsyncBolt12OfferContext, {
 	(0, offer_nonce, required),
+	(2, offer_id, option),
 });
 
 impl_writeable_tlv_based!(Bolt12RefundContext, {});

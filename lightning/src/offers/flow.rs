@@ -851,8 +851,10 @@ impl<MR: MessageRouter, L: Logger> OffersMessageFlow<MR, L> {
 		let expanded_key = &self.inbound_payment_key;
 		let secp_ctx = &self.secp_ctx;
 
-		let payment_context =
-			PaymentContext::AsyncBolt12Offer(AsyncBolt12OfferContext { offer_nonce });
+		let payment_context = PaymentContext::AsyncBolt12Offer(AsyncBolt12OfferContext {
+			offer_nonce,
+			offer_id: Some(offer.id()),
+		});
 
 		let amount_msat = offer.amount().and_then(|amount| match amount {
 			Amount::Bitcoin { amount_msats } => Some(amount_msats),
