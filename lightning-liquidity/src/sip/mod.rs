@@ -17,3 +17,5 @@
 //! [swap-in-potentiam]: https://lists.linuxfoundation.org/pipermail/lightning-dev/2023-January/003810.html
 
 pub mod address;
+pub mod event;
+pub mod msgs;

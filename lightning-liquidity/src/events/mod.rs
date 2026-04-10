@@ -24,6 +24,7 @@ use crate::lsps0;
 use crate::lsps1;
 use crate::lsps2;
 use crate::lsps5;
+use crate::sip;
 
 /// An event which you should probably take some action in response to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +43,10 @@ pub enum LiquidityEvent {
 	LSPS5Client(lsps5::event::LSPS5ClientEvent),
 	/// An LSPS5 (Webhook) server event.
 	LSPS5Service(lsps5::event::LSPS5ServiceEvent),
+	/// A swap-in-potentiam client event.
+	SIPClient(sip::event::SIPClientEvent),
+	/// A swap-in-potentiam service event.
+	SIPService(sip::event::SIPServiceEvent),
 }
 
 impl From<lsps0::event::LSPS0ClientEvent> for LiquidityEvent {
@@ -83,5 +88,17 @@ impl From<lsps5::event::LSPS5ClientEvent> for LiquidityEvent {
 impl From<lsps5::event::LSPS5ServiceEvent> for LiquidityEvent {
 	fn from(event: lsps5::event::LSPS5ServiceEvent) -> Self {
 		Self::LSPS5Service(event)
+	}
+}
+
+impl From<sip::event::SIPClientEvent> for LiquidityEvent {
+	fn from(event: sip::event::SIPClientEvent) -> Self {
+		Self::SIPClient(event)
+	}
+}
+
+impl From<sip::event::SIPServiceEvent> for LiquidityEvent {
+	fn from(event: sip::event::SIPServiceEvent) -> Self {
+		Self::SIPService(event)
 	}
 }

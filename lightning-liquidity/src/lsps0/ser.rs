@@ -25,6 +25,10 @@ use crate::lsps5::msgs::{
 	LSPS5Message, LSPS5Request, LSPS5Response, LSPS5_LIST_WEBHOOKS_METHOD_NAME,
 	LSPS5_REMOVE_WEBHOOK_METHOD_NAME, LSPS5_SET_WEBHOOK_METHOD_NAME,
 };
+use crate::sip::msgs::{
+	SIPMessage, SIPRequest, SIPResponse, SIP_GET_INFO_METHOD_NAME, SIP_REGISTER_UTXO_METHOD_NAME,
+	SIP_SWAP_REQUEST_METHOD_NAME,
+};
 
 use crate::prelude::HashMap;
 
@@ -69,6 +73,9 @@ pub(crate) enum LSPSMethod {
 	LSPS5SetWebhook,
 	LSPS5ListWebhooks,
 	LSPS5RemoveWebhook,
+	SIPGetInfo,
+	SIPRegisterUtxo,
+	SIPSwapRequest,
 }
 
 impl LSPSMethod {
@@ -83,6 +90,9 @@ impl LSPSMethod {
 			Self::LSPS5SetWebhook => LSPS5_SET_WEBHOOK_METHOD_NAME,
 			Self::LSPS5ListWebhooks => LSPS5_LIST_WEBHOOKS_METHOD_NAME,
 			Self::LSPS5RemoveWebhook => LSPS5_REMOVE_WEBHOOK_METHOD_NAME,
+			Self::SIPGetInfo => SIP_GET_INFO_METHOD_NAME,
+			Self::SIPRegisterUtxo => SIP_REGISTER_UTXO_METHOD_NAME,
+			Self::SIPSwapRequest => SIP_SWAP_REQUEST_METHOD_NAME,
 		}
 	}
 }
@@ -100,6 +110,9 @@ impl FromStr for LSPSMethod {
 			LSPS5_SET_WEBHOOK_METHOD_NAME => Ok(Self::LSPS5SetWebhook),
 			LSPS5_LIST_WEBHOOKS_METHOD_NAME => Ok(Self::LSPS5ListWebhooks),
 			LSPS5_REMOVE_WEBHOOK_METHOD_NAME => Ok(Self::LSPS5RemoveWebhook),
+			SIP_GET_INFO_METHOD_NAME => Ok(Self::SIPGetInfo),
+			SIP_REGISTER_UTXO_METHOD_NAME => Ok(Self::SIPRegisterUtxo),
+			SIP_SWAP_REQUEST_METHOD_NAME => Ok(Self::SIPSwapRequest),
 			_ => Err(&"Unknown method name"),
 		}
 	}
@@ -138,6 +151,16 @@ impl From<&LSPS5Request> for LSPSMethod {
 			LSPS5Request::SetWebhook(_) => Self::LSPS5SetWebhook,
 			LSPS5Request::ListWebhooks(_) => Self::LSPS5ListWebhooks,
 			LSPS5Request::RemoveWebhook(_) => Self::LSPS5RemoveWebhook,
+		}
+	}
+}
+
+impl From<&SIPRequest> for LSPSMethod {
+	fn from(value: &SIPRequest) -> Self {
+		match value {
+			SIPRequest::GetInfo(_) => Self::SIPGetInfo,
+			SIPRequest::RegisterUtxo(_) => Self::SIPRegisterUtxo,
+			SIPRequest::SwapRequest(_) => Self::SIPSwapRequest,
 		}
 	}
 }
@@ -326,6 +349,8 @@ pub enum LSPSMessage {
 	LSPS2(LSPS2Message),
 	/// An LSPS5 message.
 	LSPS5(LSPS5Message),
+	/// A swap-in-potentiam message.
+	SIP(SIPMessage),
 }
 
 impl LSPSMessage {
@@ -354,6 +379,9 @@ impl LSPSMessage {
 				Some((LSPSRequestId(request_id.0.clone()), request.into()))
 			},
 			LSPSMessage::LSPS5(LSPS5Message::Request(request_id, request)) => {
+				Some((LSPSRequestId(request_id.0.clone()), request.into()))
+			},
+			LSPSMessage::SIP(SIPMessage::Request(request_id, request)) => {
 				Some((LSPSRequestId(request_id.0.clone()), request.into()))
 			},
 			_ => None,
@@ -510,6 +538,47 @@ impl Serialize for LSPSMessage {
 					},
 				}
 			},
+			LSPSMessage::SIP(SIPMessage::Request(request_id, request)) => {
+				jsonrpc_object.serialize_field(JSONRPC_ID_FIELD_KEY, &request_id.0)?;
+				jsonrpc_object
+					.serialize_field(JSONRPC_METHOD_FIELD_KEY, &LSPSMethod::from(request))?;
+
+				match request {
+					SIPRequest::GetInfo(params) => {
+						jsonrpc_object.serialize_field(JSONRPC_PARAMS_FIELD_KEY, params)?
+					},
+					SIPRequest::RegisterUtxo(params) => {
+						jsonrpc_object.serialize_field(JSONRPC_PARAMS_FIELD_KEY, params)?
+					},
+					SIPRequest::SwapRequest(params) => {
+						jsonrpc_object.serialize_field(JSONRPC_PARAMS_FIELD_KEY, params)?
+					},
+				}
+			},
+			LSPSMessage::SIP(SIPMessage::Response(request_id, response)) => {
+				jsonrpc_object.serialize_field(JSONRPC_ID_FIELD_KEY, &request_id.0)?;
+
+				match response {
+					SIPResponse::GetInfo(result) => {
+						jsonrpc_object.serialize_field(JSONRPC_RESULT_FIELD_KEY, result)?
+					},
+					SIPResponse::GetInfoError(error) => {
+						jsonrpc_object.serialize_field(JSONRPC_ERROR_FIELD_KEY, error)?
+					},
+					SIPResponse::RegisterUtxo(result) => {
+						jsonrpc_object.serialize_field(JSONRPC_RESULT_FIELD_KEY, result)?
+					},
+					SIPResponse::RegisterUtxoError(error) => {
+						jsonrpc_object.serialize_field(JSONRPC_ERROR_FIELD_KEY, error)?
+					},
+					SIPResponse::SwapRequest(result) => {
+						jsonrpc_object.serialize_field(JSONRPC_RESULT_FIELD_KEY, result)?
+					},
+					SIPResponse::SwapRequestError(error) => {
+						jsonrpc_object.serialize_field(JSONRPC_ERROR_FIELD_KEY, error)?
+					},
+				}
+			},
 		}
 
 		jsonrpc_object.end()
@@ -646,6 +715,21 @@ impl<'de, 'a> Visitor<'de> for LSPSMessageVisitor<'a> {
 						id,
 						LSPS5Request::RemoveWebhook(request),
 					)))
+				},
+				LSPSMethod::SIPGetInfo => {
+					let request = serde_json::from_value(params.unwrap_or(json!({})))
+						.map_err(de::Error::custom)?;
+					Ok(LSPSMessage::SIP(SIPMessage::Request(id, SIPRequest::GetInfo(request))))
+				},
+				LSPSMethod::SIPRegisterUtxo => {
+					let request = serde_json::from_value(params.unwrap_or(json!({})))
+						.map_err(de::Error::custom)?;
+					Ok(LSPSMessage::SIP(SIPMessage::Request(id, SIPRequest::RegisterUtxo(request))))
+				},
+				LSPSMethod::SIPSwapRequest => {
+					let request = serde_json::from_value(params.unwrap_or(json!({})))
+						.map_err(de::Error::custom)?;
+					Ok(LSPSMessage::SIP(SIPMessage::Request(id, SIPRequest::SwapRequest(request))))
 				},
 			},
 			None => match self.request_id_to_method_map.remove(&id) {
@@ -793,6 +877,57 @@ impl<'de, 'a> Visitor<'de> for LSPSMessageVisitor<'a> {
 							Ok(LSPSMessage::LSPS5(LSPS5Message::Response(
 								id,
 								LSPS5Response::RemoveWebhook(response),
+							)))
+						} else {
+							Err(de::Error::custom("Received invalid JSON-RPC object: one of method, result, or error required"))
+						}
+					},
+					LSPSMethod::SIPGetInfo => {
+						if let Some(error) = error {
+							Ok(LSPSMessage::SIP(SIPMessage::Response(
+								id,
+								SIPResponse::GetInfoError(error),
+							)))
+						} else if let Some(result) = result {
+							let response =
+								serde_json::from_value(result).map_err(de::Error::custom)?;
+							Ok(LSPSMessage::SIP(SIPMessage::Response(
+								id,
+								SIPResponse::GetInfo(response),
+							)))
+						} else {
+							Err(de::Error::custom("Received invalid JSON-RPC object: one of method, result, or error required"))
+						}
+					},
+					LSPSMethod::SIPRegisterUtxo => {
+						if let Some(error) = error {
+							Ok(LSPSMessage::SIP(SIPMessage::Response(
+								id,
+								SIPResponse::RegisterUtxoError(error),
+							)))
+						} else if let Some(result) = result {
+							let response =
+								serde_json::from_value(result).map_err(de::Error::custom)?;
+							Ok(LSPSMessage::SIP(SIPMessage::Response(
+								id,
+								SIPResponse::RegisterUtxo(response),
+							)))
+						} else {
+							Err(de::Error::custom("Received invalid JSON-RPC object: one of method, result, or error required"))
+						}
+					},
+					LSPSMethod::SIPSwapRequest => {
+						if let Some(error) = error {
+							Ok(LSPSMessage::SIP(SIPMessage::Response(
+								id,
+								SIPResponse::SwapRequestError(error),
+							)))
+						} else if let Some(result) = result {
+							let response =
+								serde_json::from_value(result).map_err(de::Error::custom)?;
+							Ok(LSPSMessage::SIP(SIPMessage::Response(
+								id,
+								SIPResponse::SwapRequest(response),
 							)))
 						} else {
 							Err(de::Error::custom("Received invalid JSON-RPC object: one of method, result, or error required"))

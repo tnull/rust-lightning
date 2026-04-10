@@ -741,6 +741,16 @@ where
 					},
 				}
 			},
+			LSPSMessage::SIP(_msg) => {
+				// TODO: Route SIP messages to client/service handlers once implemented.
+				return Err(LightningError {
+					err: format!(
+						"Received SIP message but SIP handler is not yet implemented. From node {}",
+						sender_node_id
+					),
+					action: ErrorAction::IgnoreAndLog(Level::Debug),
+				});
+			},
 		}
 		Ok(())
 	}
