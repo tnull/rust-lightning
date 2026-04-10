@@ -66,6 +66,7 @@ pub mod lsps5;
 mod manager;
 pub mod message_queue;
 pub mod persist;
+pub mod sip;
 #[allow(dead_code)]
 #[allow(unused_imports)]
 mod sync;
