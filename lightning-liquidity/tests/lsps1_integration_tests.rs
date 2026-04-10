@@ -44,6 +44,7 @@ fn build_lsps1_configs(
 		lsps1_service_config: Some(lsps1_service_config),
 		lsps2_service_config: None,
 		lsps5_service_config: None,
+		sip_service_config: None,
 		advertise_service: true,
 	};
 
@@ -52,6 +53,7 @@ fn build_lsps1_configs(
 		lsps1_client_config: Some(lsps1_client_config),
 		lsps2_client_config: None,
 		lsps5_client_config: None,
+		sip_client_config: None,
 	};
 
 	(service_config, client_config)
@@ -291,6 +293,7 @@ fn lsps1_service_handler_persistence_across_restarts() {
 		}),
 		lsps2_service_config: None,
 		lsps5_service_config: None,
+		sip_service_config: None,
 		advertise_service: true,
 	};
 	let time_provider: Arc<dyn TimeProvider + Send + Sync> = Arc::new(DefaultTimeProvider);
@@ -443,6 +446,7 @@ fn lsps1_service_handler_persistence_across_restarts() {
 			lsps1_client_config: Some(lsps1_client_config),
 			lsps2_client_config: None,
 			lsps5_client_config: None,
+			sip_client_config: None,
 		};
 
 		let client_lm = LiquidityManagerSync::new_with_custom_time_provider(
@@ -921,6 +925,7 @@ fn lsps1_expired_orders_are_pruned_and_not_persisted() {
 		}),
 		lsps2_service_config: None,
 		lsps5_service_config: None,
+		sip_service_config: None,
 		advertise_service: true,
 	};
 	let time_provider: Arc<dyn TimeProvider + Send + Sync> = Arc::new(DefaultTimeProvider);
@@ -1095,6 +1100,7 @@ fn lsps1_expired_orders_are_pruned_and_not_persisted() {
 			lsps1_client_config: Some(lsps1_client_config),
 			lsps2_client_config: None,
 			lsps5_client_config: None,
+			sip_client_config: None,
 		};
 
 		let client_lm = LiquidityManagerSync::new_with_custom_time_provider(

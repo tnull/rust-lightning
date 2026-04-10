@@ -36,6 +36,9 @@ use crate::lsps2::client::{LSPS2ClientConfig, LSPS2ClientHandler};
 use crate::lsps2::msgs::LSPS2Message;
 use crate::lsps2::service::{LSPS2ServiceConfig, LSPS2ServiceHandler, LSPS2ServiceHandlerSync};
 use crate::prelude::{new_hash_map, new_hash_set, HashMap, HashSet};
+use crate::sip::client::{SIPClientConfig, SIPClientHandler};
+use crate::sip::msgs::SIPMessage;
+use crate::sip::service::{SIPServiceConfig, SIPServiceHandler};
 use crate::sync::{Arc, Mutex, RwLock};
 use crate::utils::async_poll::dummy_waker;
 #[cfg(feature = "time")]
@@ -77,6 +80,8 @@ pub struct LiquidityServiceConfig {
 	pub lsps2_service_config: Option<LSPS2ServiceConfig>,
 	/// Optional server-side configuration for LSPS5 webhook service.
 	pub lsps5_service_config: Option<LSPS5ServiceConfig>,
+	/// Optional server-side configuration for swap-in-potentiam.
+	pub sip_service_config: Option<SIPServiceConfig>,
 	/// Controls whether the liquidity service should be advertised via setting the feature bit in
 	/// node announcment and the init message.
 	pub advertise_service: bool,
@@ -94,6 +99,8 @@ pub struct LiquidityClientConfig {
 	pub lsps2_client_config: Option<LSPS2ClientConfig>,
 	/// Optional client-side configuration for LSPS5 webhook service.
 	pub lsps5_client_config: Option<LSPS5ClientConfig>,
+	/// Optional client-side configuration for swap-in-potentiam.
+	pub sip_client_config: Option<SIPClientConfig>,
 }
 
 /// A trivial trait which describes any [`LiquidityManager`].
@@ -287,6 +294,8 @@ pub struct LiquidityManager<
 	lsps2_client_handler: Option<LSPS2ClientHandler<ES, K>>,
 	lsps5_service_handler: Option<LSPS5ServiceHandler<CM, NS, K, TP>>,
 	lsps5_client_handler: Option<LSPS5ClientHandler<ES, K>>,
+	sip_client_handler: Option<SIPClientHandler<ES, K>>,
+	sip_service_handler: Option<SIPServiceHandler<K>>,
 	service_config: Option<LiquidityServiceConfig>,
 	_client_config: Option<LiquidityClientConfig>,
 	pending_msgs_or_needs_persist_notifier: Arc<Notifier>,
@@ -474,6 +483,27 @@ where
 			None
 		};
 
+		let sip_client_handler = client_config.as_ref().and_then(|config| {
+			config.sip_client_config.as_ref().map(|config| {
+				SIPClientHandler::new(
+					entropy_source.clone(),
+					Arc::clone(&pending_messages),
+					Arc::clone(&pending_events),
+					config.clone(),
+				)
+			})
+		});
+
+		let sip_service_handler = service_config.as_ref().and_then(|config| {
+			config.sip_service_config.as_ref().map(|config| {
+				SIPServiceHandler::new(
+					Arc::clone(&pending_messages),
+					Arc::clone(&pending_events),
+					config.clone(),
+				)
+			})
+		});
+
 		let lsps0_client_handler = LSPS0ClientHandler::new(
 			entropy_source.clone(),
 			Arc::clone(&pending_messages),
@@ -499,6 +529,8 @@ where
 			lsps2_service_handler,
 			lsps5_client_handler,
 			lsps5_service_handler,
+			sip_client_handler,
+			sip_service_handler,
 			service_config,
 			_client_config: client_config,
 			pending_msgs_or_needs_persist_notifier,
@@ -556,6 +588,21 @@ where
 	/// The returned handler allows to initiate the LSPS5 service-side flow.
 	pub fn lsps5_service_handler(&self) -> Option<&LSPS5ServiceHandler<CM, NS, K, TP>> {
 		self.lsps5_service_handler.as_ref()
+	}
+
+	/// Returns a reference to the SIP client-side handler.
+	///
+	/// The returned handler allows to initiate the swap-in-potentiam client-side flow, i.e.,
+	/// query LSP parameters, register UTXOs, and request swaps into Lightning channels.
+	pub fn sip_client_handler(&self) -> Option<&SIPClientHandler<ES, K>> {
+		self.sip_client_handler.as_ref()
+	}
+
+	/// Returns a reference to the SIP server-side handler.
+	///
+	/// The returned handler processes swap-in-potentiam requests from clients.
+	pub fn sip_service_handler(&self) -> Option<&SIPServiceHandler<K>> {
+		self.sip_service_handler.as_ref()
 	}
 
 	/// Returns a [`Future`] that will complete when the next batch of pending messages is ready to
@@ -741,15 +788,21 @@ where
 					},
 				}
 			},
-			LSPSMessage::SIP(_msg) => {
-				// TODO: Route SIP messages to client/service handlers once implemented.
-				return Err(LightningError {
-					err: format!(
-						"Received SIP message but SIP handler is not yet implemented. From node {}",
-						sender_node_id
-					),
-					action: ErrorAction::IgnoreAndLog(Level::Debug),
-				});
+			LSPSMessage::SIP(msg @ SIPMessage::Response(..)) => match &self.sip_client_handler {
+				Some(sip_client_handler) => {
+					sip_client_handler.handle_message(msg, sender_node_id)?;
+				},
+				None => {
+					return Err(LightningError { err: format!("Received SIP response message without SIP client handler configured. From node {}", sender_node_id), action: ErrorAction::IgnoreAndLog(Level::Debug)});
+				},
+			},
+			LSPSMessage::SIP(msg @ SIPMessage::Request(..)) => match &self.sip_service_handler {
+				Some(sip_service_handler) => {
+					sip_service_handler.handle_message(msg, sender_node_id)?;
+				},
+				None => {
+					return Err(LightningError { err: format!("Received SIP request message without SIP service handler configured. From node {}", sender_node_id), action: ErrorAction::IgnoreAndLog(Level::Debug)});
+				},
 			},
 		}
 		Ok(())
