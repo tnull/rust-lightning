@@ -65,6 +65,7 @@ pub mod lsps2;
 pub mod lsps5;
 mod manager;
 pub mod message_queue;
+mod peer_state;
 pub mod persist;
 #[allow(dead_code)]
 #[allow(unused_imports)]
