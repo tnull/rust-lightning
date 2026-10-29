@@ -18,8 +18,9 @@ use crate::events::EventQueue;
 use crate::lsps0::ser::{LSPSProtocolMessageHandler, LSPSRequestId, LSPSResponseError};
 use crate::lsps2::event::LSPS2ClientEvent;
 use crate::message_queue::MessageQueue;
+use crate::peer_state::PeerStates;
 use crate::prelude::{new_hash_map, new_hash_set, HashMap, HashSet};
-use crate::sync::{Arc, Mutex, RwLock};
+use crate::sync::{Arc, Mutex};
 
 use lightning::ln::msgs::{ErrorAction, LightningError};
 use lightning::sign::EntropySource;
@@ -71,7 +72,7 @@ pub struct LSPS2ClientHandler<ES: EntropySource, K: KVStore + Clone> {
 	entropy_source: ES,
 	pending_messages: Arc<MessageQueue>,
 	pending_events: Arc<EventQueue<K>>,
-	per_peer_state: RwLock<HashMap<PublicKey, Mutex<PeerState>>>,
+	per_peer_state: PeerStates<PeerState>,
 	config: LSPS2ClientConfig,
 }
 
@@ -85,7 +86,7 @@ impl<ES: EntropySource, K: KVStore + Clone> LSPS2ClientHandler<ES, K> {
 			entropy_source,
 			pending_messages,
 			pending_events,
-			per_peer_state: RwLock::new(new_hash_map()),
+			per_peer_state: PeerStates::new(),
 			config,
 		}
 	}
@@ -375,7 +376,7 @@ impl<ES: EntropySource, K: KVStore + Clone> LSPSProtocolMessageHandler
 	fn handle_message(
 		&self, message: Self::ProtocolMessage, counterparty_node_id: &PublicKey,
 	) -> Result<(), LightningError> {
-		match message {
+		let res = match message {
 			LSPS2Message::Response(request_id, response) => match response {
 				LSPS2Response::GetInfo(result) => {
 					self.handle_get_info_response(request_id, counterparty_node_id, result)
@@ -397,9 +398,51 @@ impl<ES: EntropySource, K: KVStore + Clone> LSPSProtocolMessageHandler
 				);
 				Err(LightningError { err: format!("Client handler received LSPS2 request message from node {}. This should never happen.", counterparty_node_id), action: ErrorAction::IgnoreAndLog(Level::Info)})
 			},
-		}
+		};
+		self.per_peer_state.remove_if(counterparty_node_id, |peer_state| {
+			peer_state.pending_get_info_requests.is_empty()
+				&& peer_state.pending_buy_requests.is_empty()
+		});
+		res
 	}
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+	use super::*;
+
+	use crate::tests::utils::{self, TestEntropy};
+
+	use lightning::util::persist::KVStoreSyncWrapper;
+	use lightning::util::test_utils::TestStore;
+	use lightning::util::wakers::Notifier;
+
+	use alloc::collections::VecDeque;
+
+	#[test]
+	fn peer_state_is_dropped_once_no_requests_are_pending() {
+		let pending_messages = Arc::new(MessageQueue::new(Arc::new(Notifier::new())));
+		let kv_store = Arc::new(KVStoreSyncWrapper(Arc::new(TestStore::new(false))));
+		let event_queue =
+			Arc::new(EventQueue::new(VecDeque::new(), kv_store, Arc::new(Notifier::new())));
+		let handler = LSPS2ClientHandler::new(
+			Arc::new(TestEntropy {}),
+			Arc::clone(&pending_messages),
+			event_queue,
+			LSPS2ClientConfig {},
+		);
+		let counterparty_node_id = utils::parse_pubkey(
+			"027100442c3b79f606f80f322d98d499eefcb060599efc5d4ecb00209c2cb54190",
+		)
+		.unwrap();
+
+		let request_id = handler.request_opening_params(counterparty_node_id, None);
+		assert_eq!(pending_messages.get_and_clear_pending_msgs().len(), 1);
+		assert!(handler.per_peer_state.read().unwrap().contains_key(&counterparty_node_id));
+
+		let error = LSPSResponseError { code: 1, message: "error".to_string(), data: None };
+		let msg = LSPS2Message::Response(request_id, LSPS2Response::GetInfoError(error));
+		assert!(handler.handle_message(msg, &counterparty_node_id).is_err());
+		assert!(!handler.per_peer_state.read().unwrap().contains_key(&counterparty_node_id));
+	}
+}
