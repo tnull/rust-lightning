@@ -19,8 +19,9 @@ use crate::message_queue::MessageQueue;
 
 use crate::events::EventQueue;
 use crate::lsps0::ser::{LSPSProtocolMessageHandler, LSPSRequestId, LSPSResponseError};
-use crate::prelude::{new_hash_map, HashMap, HashSet};
-use crate::sync::{Arc, Mutex, RwLock};
+use crate::peer_state::PeerStates;
+use crate::prelude::HashSet;
+use crate::sync::{Arc, Mutex};
 
 use lightning::ln::msgs::{ErrorAction, LightningError};
 use lightning::sign::EntropySource;
@@ -49,7 +50,7 @@ pub struct LSPS1ClientHandler<ES: EntropySource, K: KVStore + Clone> {
 	entropy_source: ES,
 	pending_messages: Arc<MessageQueue>,
 	pending_events: Arc<EventQueue<K>>,
-	per_peer_state: RwLock<HashMap<PublicKey, Mutex<PeerState>>>,
+	per_peer_state: PeerStates<PeerState>,
 	config: LSPS1ClientConfig,
 }
 
@@ -63,7 +64,7 @@ impl<ES: EntropySource, K: KVStore + Clone> LSPS1ClientHandler<ES, K> {
 			entropy_source,
 			pending_messages,
 			pending_events,
-			per_peer_state: RwLock::new(new_hash_map()),
+			per_peer_state: PeerStates::new(),
 			config,
 		}
 	}
@@ -431,7 +432,7 @@ impl<ES: EntropySource, K: KVStore + Clone> LSPSProtocolMessageHandler
 	fn handle_message(
 		&self, message: Self::ProtocolMessage, counterparty_node_id: &PublicKey,
 	) -> Result<(), LightningError> {
-		match message {
+		let res = match message {
 			LSPS1Message::Response(request_id, response) => match response {
 				LSPS1Response::GetInfo(params) => {
 					self.handle_get_info_response(request_id, counterparty_node_id, params)
@@ -465,6 +466,60 @@ impl<ES: EntropySource, K: KVStore + Clone> LSPSProtocolMessageHandler
 					action: ErrorAction::IgnoreAndLog(Level::Error),
 				})
 			},
-		}
+		};
+		self.per_peer_state.remove_if(counterparty_node_id, |peer_state| {
+			peer_state.pending_get_info_requests.is_empty()
+				&& peer_state.pending_create_order_requests.is_empty()
+				&& peer_state.pending_get_order_requests.is_empty()
+		});
+		res
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	use crate::tests::utils::{self, TestEntropy};
+
+	use lightning::util::persist::KVStoreSyncWrapper;
+	use lightning::util::test_utils::TestStore;
+	use lightning::util::wakers::Notifier;
+
+	use alloc::collections::VecDeque;
+	use alloc::string::ToString;
+
+	#[test]
+	fn peer_state_is_dropped_once_no_requests_are_pending() {
+		let pending_messages = Arc::new(MessageQueue::new(Arc::new(Notifier::new())));
+		let kv_store = Arc::new(KVStoreSyncWrapper(Arc::new(TestStore::new(false))));
+		let event_queue =
+			Arc::new(EventQueue::new(VecDeque::new(), kv_store, Arc::new(Notifier::new())));
+		let handler = LSPS1ClientHandler::new(
+			Arc::new(TestEntropy {}),
+			Arc::clone(&pending_messages),
+			event_queue,
+			LSPS1ClientConfig { max_channel_fees_msat: None },
+		);
+		let counterparty_node_id = utils::parse_pubkey(
+			"027100442c3b79f606f80f322d98d499eefcb060599efc5d4ecb00209c2cb54190",
+		)
+		.unwrap();
+
+		let get_info_request_id = handler.request_supported_options(counterparty_node_id);
+		let get_order_request_id =
+			handler.check_order_status(&counterparty_node_id, LSPS1OrderId("order".to_string()));
+		assert_eq!(pending_messages.get_and_clear_pending_msgs().len(), 2);
+
+		let error = LSPSResponseError { code: 1, message: "error".to_string(), data: None };
+		let get_info_error = LSPS1Response::GetInfoError(error.clone());
+		let msg = LSPS1Message::Response(get_info_request_id, get_info_error);
+		assert!(handler.handle_message(msg, &counterparty_node_id).is_err());
+		assert!(handler.per_peer_state.read().unwrap().contains_key(&counterparty_node_id));
+
+		let get_order_error = LSPS1Response::GetOrderError(error);
+		let msg = LSPS1Message::Response(get_order_request_id, get_order_error);
+		assert!(handler.handle_message(msg, &counterparty_node_id).is_err());
+		assert!(!handler.per_peer_state.read().unwrap().contains_key(&counterparty_node_id));
 	}
 }
