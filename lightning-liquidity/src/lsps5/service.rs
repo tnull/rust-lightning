@@ -17,12 +17,9 @@ use crate::lsps5::msgs::{
 	SetWebhookRequest, SetWebhookResponse, WebhookNotification, WebhookNotificationMethod,
 };
 use crate::message_queue::MessageQueue;
-use crate::persist::{
-	LIQUIDITY_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, LSPS5_SERVICE_PERSISTENCE_SECONDARY_NAMESPACE,
-};
-use crate::prelude::hash_map::Entry;
+use crate::peer_state::{PeerStateEntry, PersistedPeerStates};
 use crate::prelude::*;
-use crate::sync::{Arc, Mutex, RwLock, RwLockWriteGuard};
+use crate::sync::{Arc, Mutex};
 use crate::utils::time::TimeProvider;
 
 use bitcoin::secp256k1::PublicKey;
@@ -32,10 +29,8 @@ use lightning::ln::msgs::{ErrorAction, LightningError};
 use lightning::sign::NodeSigner;
 use lightning::util::logger::Level;
 use lightning::util::persist::KVStore;
-use lightning::util::ser::Writeable;
 
 use core::ops::Deref;
-use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 
 use alloc::string::String;
@@ -45,7 +40,7 @@ use super::event::LSPS5ServiceEvent;
 use super::msgs::{
 	LSPS5AppName, LSPS5Message, LSPS5ProtocolError, LSPS5Request, LSPS5Response, LSPS5WebhookUrl,
 };
-use super::peer_state::{PeerState, Webhook};
+use super::peer_state::{PeerState, PruneContext, Webhook};
 
 /// Minimum number of days to retain webhooks after a client's last channel is closed.
 pub const MIN_WEBHOOK_RETENTION_DAYS: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -115,15 +110,13 @@ where
 	TP::Target: TimeProvider,
 {
 	config: LSPS5ServiceConfig,
-	per_peer_state: RwLock<HashMap<PublicKey, PeerState>>,
+	per_peer_state: PersistedPeerStates<PeerState, K>,
 	event_queue: Arc<EventQueue<K>>,
 	pending_messages: Arc<MessageQueue>,
 	time_provider: TP,
 	channel_manager: CM,
 	node_signer: NS,
-	kv_store: K,
 	last_pruning: Mutex<Option<LSPSDateTime>>,
-	persistence_in_flight: AtomicUsize,
 }
 
 impl<CM: Deref, NS: NodeSigner, K: KVStore + Clone, TP: Deref> LSPS5ServiceHandler<CM, NS, K, TP>
@@ -133,12 +126,11 @@ where
 {
 	/// Constructs a `LSPS5ServiceHandler` using the given time provider.
 	pub(crate) fn new_with_time_provider(
-		peer_states: HashMap<PublicKey, PeerState>, event_queue: Arc<EventQueue<K>>,
-		pending_messages: Arc<MessageQueue>, channel_manager: CM, kv_store: K, node_signer: NS,
+		per_peer_state: PersistedPeerStates<PeerState, K>, event_queue: Arc<EventQueue<K>>,
+		pending_messages: Arc<MessageQueue>, channel_manager: CM, node_signer: NS,
 		config: LSPS5ServiceConfig, time_provider: TP,
 	) -> Self {
 		assert!(config.max_webhooks_per_client > 0, "`max_webhooks_per_client` must be > 0");
-		let per_peer_state = RwLock::new(peer_states);
 		Self {
 			config,
 			per_peer_state,
@@ -147,9 +139,7 @@ where
 			time_provider,
 			channel_manager,
 			node_signer,
-			kv_store,
 			last_pruning: Mutex::new(None),
-			persistence_in_flight: AtomicUsize::new(0),
 		}
 	}
 
@@ -181,169 +171,22 @@ where
 		}
 	}
 
-	async fn persist_peer_state(
-		&self, counterparty_node_id: PublicKey,
-	) -> Result<(), lightning::io::Error> {
-		let fut = {
-			let mut outer_state_lock = self.per_peer_state.write().unwrap();
-			let encoded = match outer_state_lock.get_mut(&counterparty_node_id) {
-				None => {
-					// We dropped the peer state by now.
-					return Ok(());
-				},
-				Some(entry) => {
-					if !entry.needs_persist {
-						// We already have persisted otherwise by now.
-						return Ok(());
-					} else {
-						entry.needs_persist = false;
-						entry.encode()
-					}
-				},
-			};
-
-			let key = counterparty_node_id.to_string();
-
-			// Begin the write with the `per_peer_state` write lock held to avoid racing with
-			// potentially-in-flight `persist` calls writing state for the same peer.
-			self.kv_store.write(
-				LIQUIDITY_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-				LSPS5_SERVICE_PERSISTENCE_SECONDARY_NAMESPACE,
-				&key,
-				encoded,
-			)
-		};
-
-		fut.await.map_err(|e| {
-			self.per_peer_state
-				.write()
-				.unwrap()
-				.get_mut(&counterparty_node_id)
-				.map(|p| p.needs_persist = true);
-			e
-		})
-	}
-
 	pub(crate) async fn persist(&self) -> Result<bool, lightning::io::Error> {
-		// TODO: We should eventually persist in parallel, however, when we do, we probably want to
-		// introduce some batching to upper-bound the number of requests inflight at any given
-		// time.
+		self.check_prune_stale_webhooks();
 
-		if self.persistence_in_flight.fetch_add(1, Ordering::AcqRel) > 0 {
-			// If we're not the first event processor to get here, just return early, the increment
-			// we just did will be treated as "go around again" at the end.
-			return Ok(false);
-		}
-
-		let mut did_persist = false;
-
-		loop {
-			match self.do_persist().await {
-				Ok(pass_did_persist) => did_persist |= pass_did_persist,
-				Err(e) => {
-					self.persistence_in_flight.store(0, Ordering::Release);
-					return Err(e);
-				},
-			}
-
-			if self.persistence_in_flight.fetch_sub(1, Ordering::AcqRel) != 1 {
-				// If another thread incremented the state while we were running we should go
-				// around again, but only once.
-				self.persistence_in_flight.store(1, Ordering::Release);
-				continue;
-			}
-			break;
-		}
-
-		Ok(did_persist)
+		let peers_with_open_channel = self
+			.channel_manager
+			.get_cm()
+			.list_channels()
+			.iter()
+			.filter(|c| c.is_usable)
+			.map(|c| c.counterparty.node_id)
+			.collect();
+		let mut ctx = PruneContext { now: None, peers_with_open_channel };
+		self.per_peer_state.persist(&mut ctx).await
 	}
 
-	async fn do_persist(&self) -> Result<bool, lightning::io::Error> {
-		let mut did_persist = false;
-		let mut need_remove = Vec::new();
-		let mut need_persist = Vec::new();
-
-		self.check_prune_stale_webhooks(&mut self.per_peer_state.write().unwrap());
-		{
-			let outer_state_lock = self.per_peer_state.read().unwrap();
-
-			for (client_id, peer_state) in outer_state_lock.iter() {
-				let is_prunable = peer_state.is_prunable();
-				let has_open_channel = self.client_has_open_channel(client_id);
-				if is_prunable && !has_open_channel {
-					need_remove.push(*client_id);
-				} else if peer_state.needs_persist {
-					need_persist.push(*client_id);
-				}
-			}
-		}
-
-		for client_id in need_persist.into_iter() {
-			debug_assert!(!need_remove.contains(&client_id));
-			self.persist_peer_state(client_id).await?;
-			did_persist = true;
-		}
-
-		for client_id in need_remove {
-			// Persist the emptied state before removing the key so that if the removal
-			// below fails, the on-disk record matches the in-memory state. Otherwise a
-			// restart would reload the peer with the webhooks the client asked us to
-			// remove, resurrecting them.
-			self.persist_peer_state(client_id).await?;
-
-			let mut future_opt = None;
-			let mut removed_state = None;
-			{
-				// We need to take the `per_peer_state` write lock to remove an entry, but also
-				// have to hold it until after the `remove` call returns (but not through
-				// future completion) to ensure that writes for the peer's state are
-				// well-ordered with other `persist_peer_state` calls even across the removal
-				// itself.
-				let mut per_peer_state = self.per_peer_state.write().unwrap();
-				if let Entry::Occupied(mut entry) = per_peer_state.entry(client_id) {
-					let state = entry.get_mut();
-					if state.is_prunable() && !self.client_has_open_channel(&client_id) {
-						removed_state = Some(entry.remove());
-						let key = client_id.to_string();
-						future_opt = Some(self.kv_store.remove(
-							LIQUIDITY_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-							LSPS5_SERVICE_PERSISTENCE_SECONDARY_NAMESPACE,
-							&key,
-							true,
-						));
-					} else {
-						// If the peer was re-added, force a re-persist of the current state.
-						state.needs_persist = true;
-					}
-				} else {
-					// This should never happen, we can only have one `persist` call
-					// in-progress at once and map entries are only removed by it.
-					debug_assert!(false);
-				}
-			}
-			if let Some(future) = future_opt {
-				if let Err(e) = future.await {
-					// Put the emptied state back so a later `persist` retries the removal,
-					// unless the peer was re-added in the meantime.
-					if let Some(mut state) = removed_state {
-						state.needs_persist = true;
-						self.per_peer_state.write().unwrap().entry(client_id).or_insert(state);
-					}
-					return Err(e);
-				}
-				did_persist = true;
-			} else {
-				self.persist_peer_state(client_id).await?;
-				did_persist = true;
-			}
-		}
-
-		Ok(did_persist)
-	}
-
-	fn check_prune_stale_webhooks<'a>(
-		&self, outer_state_lock: &mut RwLockWriteGuard<'a, HashMap<PublicKey, PeerState>>,
-	) {
+	fn check_prune_stale_webhooks(&self) {
 		let mut last_pruning = self.last_pruning.lock().unwrap();
 		let now =
 			LSPSDateTime::new_from_duration_since_epoch(self.time_provider.duration_since_epoch());
@@ -353,11 +196,10 @@ where
 		});
 
 		if should_prune {
-			for (_, peer_state) in outer_state_lock.iter_mut() {
-				// Prune stale webhooks, but leave removal of the peers states to the prune logic
-				// in `persist` which will remove it from the store.
-				peer_state.prune_stale_webhooks(now)
-			}
+			// Prune stale webhooks, but leave removal of the peers states to the prune logic
+			// in `persist` which will remove it from the store.
+			let mut ctx = PruneContext { now: Some(now), peers_with_open_channel: new_hash_set() };
+			self.per_peer_state.prune_expired_all(&mut ctx);
 			*last_pruning = Some(now);
 		}
 	}
@@ -370,8 +212,11 @@ where
 
 		let mut outer_state_lock = self.per_peer_state.write().unwrap();
 
-		let peer_state =
-			outer_state_lock.entry(counterparty_node_id).or_insert_with(PeerState::default);
+		let peer_state = outer_state_lock
+			.entry(counterparty_node_id)
+			.or_insert_with(|| Mutex::new(PeerStateEntry::new(PeerState::default())))
+			.get_mut()
+			.unwrap();
 
 		let now =
 			LSPSDateTime::new_from_duration_since_epoch(self.time_provider.duration_since_epoch());
@@ -412,6 +257,7 @@ where
 			};
 
 			peer_state.insert_webhook(params.app_name.clone(), webhook);
+			peer_state.needs_persist = true;
 		}
 
 		if !no_change {
@@ -454,8 +300,10 @@ where
 		let mut message_queue_notifier = self.pending_messages.notifier();
 
 		let outer_state_lock = self.per_peer_state.read().unwrap();
-		let app_names =
-			outer_state_lock.get(&counterparty_node_id).map(|p| p.app_names()).unwrap_or_default();
+		let app_names = outer_state_lock
+			.get(&counterparty_node_id)
+			.map(|p| p.lock().unwrap().app_names())
+			.unwrap_or_default();
 
 		let max_webhooks = self.config.max_webhooks_per_client;
 
@@ -475,7 +323,9 @@ where
 		let mut outer_state_lock = self.per_peer_state.write().unwrap();
 
 		if let Some(peer_state) = outer_state_lock.get_mut(&counterparty_node_id) {
+			let peer_state = peer_state.get_mut().unwrap();
 			if peer_state.remove_webhook(&params.app_name) {
+				peer_state.needs_persist = true;
 				let response = RemoveWebhookResponse {};
 				let msg =
 					LSPS5Message::Response(request_id, LSPS5Response::RemoveWebhook(response))
@@ -598,7 +448,7 @@ where
 	) -> Result<(), LSPS5ProtocolError> {
 		let mut outer_state_lock = self.per_peer_state.write().unwrap();
 		let peer_state = if let Some(peer_state) = outer_state_lock.get_mut(&client_id) {
-			peer_state
+			peer_state.get_mut().unwrap()
 		} else {
 			return Ok(());
 		};
@@ -620,6 +470,7 @@ where
 			}
 		}
 
+		peer_state.needs_persist = true;
 		for (app_name, webhook) in peer_state.webhooks_mut().iter_mut() {
 			self.send_notification(
 				client_id,
@@ -687,25 +538,31 @@ where
 	}
 
 	pub(crate) fn peer_connected(&self, counterparty_node_id: &PublicKey) {
-		let mut outer_state_lock = self.per_peer_state.write().unwrap();
-		if let Some(peer_state) = outer_state_lock.get_mut(counterparty_node_id) {
+		if let Some(peer_state) = self.per_peer_state.write().unwrap().get_mut(counterparty_node_id)
+		{
+			let peer_state = peer_state.get_mut().unwrap();
 			let now = LSPSDateTime::new_from_duration_since_epoch(
 				self.time_provider.duration_since_epoch(),
 			);
-			peer_state.reset_notification_cooldown(now);
+			if peer_state.reset_notification_cooldown(now) {
+				peer_state.needs_persist = true;
+			}
 		}
-		self.check_prune_stale_webhooks(&mut outer_state_lock);
+		self.check_prune_stale_webhooks();
 	}
 
 	pub(crate) fn peer_disconnected(&self, counterparty_node_id: &PublicKey) {
-		let mut outer_state_lock = self.per_peer_state.write().unwrap();
-		if let Some(peer_state) = outer_state_lock.get_mut(counterparty_node_id) {
+		if let Some(peer_state) = self.per_peer_state.write().unwrap().get_mut(counterparty_node_id)
+		{
+			let peer_state = peer_state.get_mut().unwrap();
 			let now = LSPSDateTime::new_from_duration_since_epoch(
 				self.time_provider.duration_since_epoch(),
 			);
-			peer_state.reset_notification_cooldown(now);
+			if peer_state.reset_notification_cooldown(now) {
+				peer_state.needs_persist = true;
+			}
 		}
-		self.check_prune_stale_webhooks(&mut outer_state_lock);
+		self.check_prune_stale_webhooks();
 	}
 }
 

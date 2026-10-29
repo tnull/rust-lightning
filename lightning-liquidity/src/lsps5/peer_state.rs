@@ -13,6 +13,8 @@ use super::msgs::{LSPS5AppName, LSPS5WebhookUrl};
 use super::service::{MIN_WEBHOOK_RETENTION_DAYS, NOTIFICATION_COOLDOWN_RESET_INTERVAL};
 
 use crate::lsps0::ser::LSPSDateTime;
+use crate::peer_state::PrunablePeerState;
+use crate::prelude::HashSet;
 
 use lightning::impl_ser_tlv_based;
 
@@ -50,15 +52,11 @@ pub(crate) struct PeerState {
 	// repeated wake-ups, while this protects registered notification URLs from amplification via
 	// rapid connection churn.
 	pub(super) last_notification_cooldown_reset: Option<LSPSDateTime>,
-	pub(super) needs_persist: bool,
 }
 
 impl PeerState {
 	pub(super) fn webhook_mut(&mut self, name: &LSPS5AppName) -> Option<&mut Webhook> {
-		let res =
-			self.webhooks.iter_mut().find_map(|(n, h)| if n == name { Some(h) } else { None });
-		self.needs_persist |= true;
-		res
+		self.webhooks.iter_mut().find_map(|(n, h)| if n == name { Some(h) } else { None })
 	}
 
 	pub(super) fn webhooks(&self) -> &Vec<(LSPS5AppName, Webhook)> {
@@ -66,9 +64,7 @@ impl PeerState {
 	}
 
 	pub(super) fn webhooks_mut(&mut self) -> &mut Vec<(LSPS5AppName, Webhook)> {
-		let res = &mut self.webhooks;
-		self.needs_persist |= true;
-		res
+		&mut self.webhooks
 	}
 
 	pub(super) fn webhooks_len(&self) -> usize {
@@ -88,7 +84,6 @@ impl PeerState {
 		}
 
 		self.webhooks.push((name, hook));
-		self.needs_persist |= true;
 	}
 
 	pub(super) fn remove_webhook(&mut self, name: &LSPS5AppName) -> bool {
@@ -101,55 +96,65 @@ impl PeerState {
 				false
 			}
 		});
-		self.needs_persist |= true;
 		removed
 	}
 
-	pub(super) fn reset_notification_cooldown(&mut self, now: LSPSDateTime) {
+	// Returns whether the cooldowns were reset.
+	pub(super) fn reset_notification_cooldown(&mut self, now: LSPSDateTime) -> bool {
 		let can_reset = self.last_notification_cooldown_reset.as_ref().map_or(true, |last_reset| {
 			now.duration_since(last_reset) >= NOTIFICATION_COOLDOWN_RESET_INTERVAL
 		});
 		if !can_reset {
-			return;
+			return false;
 		}
 
 		for (_, h) in self.webhooks.iter_mut() {
 			h.last_notification_sent = None;
 		}
 		self.last_notification_cooldown_reset = Some(now);
-		self.needs_persist |= true;
-	}
-
-	// Returns whether the entire state is empty and can be pruned.
-	pub(super) fn prune_stale_webhooks(&mut self, now: LSPSDateTime) {
-		self.webhooks.retain(|(_, webhook)| {
-			let should_prune = now.duration_since(&webhook.last_used) >= MIN_WEBHOOK_RETENTION_DAYS;
-			if should_prune {
-				self.needs_persist |= true;
-			}
-			!should_prune
-		});
-	}
-
-	pub(super) fn is_prunable(&self) -> bool {
-		self.webhooks.is_empty()
+		true
 	}
 }
 
 impl Default for PeerState {
 	fn default() -> Self {
 		let webhooks = Vec::new();
-		let needs_persist = true;
 		let last_notification_cooldown_reset = None;
-		Self { webhooks, last_notification_cooldown_reset, needs_persist }
+		Self { webhooks, last_notification_cooldown_reset }
 	}
 }
 
 impl_ser_tlv_based!(PeerState, {
 	(0, webhooks, required_vec),
 	(_unused, last_notification_cooldown_reset, (static_value, None::<LSPSDateTime>)),
-	(_unused, needs_persist, (static_value, false)),
 });
+
+pub(crate) struct PruneContext {
+	/// The current time if stale webhooks are due to be pruned.
+	pub(super) now: Option<LSPSDateTime>,
+	/// Clients we have a usable channel with, whose state is retained even without webhooks.
+	pub(super) peers_with_open_channel: HashSet<PublicKey>,
+}
+
+impl PrunablePeerState for PeerState {
+	type PruneContext = PruneContext;
+
+	fn prune_expired(&mut self, _counterparty_node_id: &PublicKey, ctx: &mut PruneContext) -> bool {
+		let now = match ctx.now {
+			Some(now) => now,
+			None => return false,
+		};
+		let num_webhooks = self.webhooks.len();
+		self.webhooks.retain(|(_, webhook)| {
+			now.duration_since(&webhook.last_used) < MIN_WEBHOOK_RETENTION_DAYS
+		});
+		self.webhooks.len() != num_webhooks
+	}
+
+	fn is_prunable(&self, counterparty_node_id: &PublicKey, ctx: &PruneContext) -> bool {
+		self.webhooks.is_empty() && !ctx.peers_with_open_channel.contains(counterparty_node_id)
+	}
+}
 
 #[cfg(test)]
 mod tests {
@@ -188,7 +193,6 @@ mod tests {
 		PeerState {
 			webhooks: vec![test_webhook(last_notification_sent)],
 			last_notification_cooldown_reset: None,
-			needs_persist: false,
 		}
 	}
 
@@ -197,26 +201,21 @@ mod tests {
 		let first_reset = lsps_datetime(2_000);
 		let mut peer_state = test_peer_state(Some(first_reset));
 
-		peer_state.reset_notification_cooldown(first_reset);
+		assert!(peer_state.reset_notification_cooldown(first_reset));
 		assert_eq!(peer_state.webhooks()[0].1.last_notification_sent, None);
 		assert_eq!(peer_state.last_notification_cooldown_reset, Some(first_reset));
-		assert!(peer_state.needs_persist);
 
-		peer_state.needs_persist = false;
 		let skipped_reset = lsps_datetime_millis(2_000_099);
 		let recent_notification = skipped_reset;
 		peer_state.webhooks_mut()[0].1.last_notification_sent = Some(recent_notification);
-		peer_state.needs_persist = false;
 
-		peer_state.reset_notification_cooldown(skipped_reset);
+		assert!(!peer_state.reset_notification_cooldown(skipped_reset));
 		assert_eq!(peer_state.webhooks()[0].1.last_notification_sent, Some(recent_notification));
 		assert_eq!(peer_state.last_notification_cooldown_reset, Some(first_reset));
-		assert!(!peer_state.needs_persist);
 
 		let allowed_reset = lsps_datetime_millis(2_000_100);
-		peer_state.reset_notification_cooldown(allowed_reset);
+		assert!(peer_state.reset_notification_cooldown(allowed_reset));
 		assert_eq!(peer_state.webhooks()[0].1.last_notification_sent, None);
 		assert_eq!(peer_state.last_notification_cooldown_reset, Some(allowed_reset));
-		assert!(peer_state.needs_persist);
 	}
 }

@@ -10,17 +10,12 @@
 //! Types and utils for persistence.
 
 use crate::events::{EventQueueDeserWrapper, LiquidityEvent};
-use crate::lsps5::peer_state::PeerState as LSPS5ServicePeerState;
-use crate::prelude::{new_hash_map, HashMap};
 
 use lightning::io::Cursor;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::Readable;
 
-use bitcoin::secp256k1::PublicKey;
-
 use alloc::collections::VecDeque;
-use core::str::FromStr;
 
 /// The primary namespace under which the [`LiquidityManager`] will be persisted.
 ///
@@ -81,45 +76,4 @@ pub(crate) async fn read_event_queue<K: KVStore>(
 	})?;
 
 	Ok(Some(queue.0))
-}
-
-pub(crate) async fn read_lsps5_service_peer_states<K: KVStore>(
-	kv_store: K,
-) -> Result<HashMap<PublicKey, LSPS5ServicePeerState>, lightning::io::Error> {
-	let mut res = new_hash_map();
-
-	for stored_key in kv_store
-		.list(
-			LIQUIDITY_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-			LSPS5_SERVICE_PERSISTENCE_SECONDARY_NAMESPACE,
-		)
-		.await?
-	{
-		let mut reader = Cursor::new(
-			kv_store
-				.read(
-					LIQUIDITY_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-					LSPS5_SERVICE_PERSISTENCE_SECONDARY_NAMESPACE,
-					&stored_key,
-				)
-				.await?,
-		);
-
-		let peer_state = LSPS5ServicePeerState::read(&mut reader).map_err(|_| {
-			lightning::io::Error::new(
-				lightning::io::ErrorKind::InvalidData,
-				"Failed to deserialize LSPS5 peer state",
-			)
-		})?;
-
-		let key = PublicKey::from_str(&stored_key).map_err(|_| {
-			lightning::io::Error::new(
-				lightning::io::ErrorKind::InvalidData,
-				"Failed to deserialize stored key entry",
-			)
-		})?;
-
-		res.insert(key, peer_state);
-	}
-	Ok(res)
 }
