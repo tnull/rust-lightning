@@ -19,8 +19,8 @@ use crate::lsps5::msgs::{
 };
 
 use crate::message_queue::MessageQueue;
-use crate::prelude::{new_hash_map, HashMap};
-use crate::sync::{Arc, Mutex, RwLock};
+use crate::peer_state::PeerStates;
+use crate::sync::{Arc, Mutex};
 use crate::utils::generate_request_id;
 
 use super::msgs::{LSPS5AppName, LSPS5Error, LSPS5WebhookUrl};
@@ -127,7 +127,7 @@ pub struct LSPS5ClientHandler<ES: EntropySource, K: KVStore + Clone> {
 	pending_messages: Arc<MessageQueue>,
 	pending_events: Arc<EventQueue<K>>,
 	entropy_source: ES,
-	per_peer_state: RwLock<HashMap<PublicKey, Mutex<PeerState>>>,
+	per_peer_state: PeerStates<PeerState>,
 	_config: LSPS5ClientConfig,
 }
 
@@ -141,7 +141,7 @@ impl<ES: EntropySource, K: KVStore + Clone> LSPS5ClientHandler<ES, K> {
 			pending_messages,
 			pending_events,
 			entropy_source,
-			per_peer_state: RwLock::new(new_hash_map()),
+			per_peer_state: PeerStates::new(),
 			_config,
 		}
 	}
@@ -395,24 +395,9 @@ impl<ES: EntropySource, K: KVStore + Clone> LSPS5ClientHandler<ES, K> {
 		};
 		self.with_peer_state(*counterparty_node_id, handle_response);
 
-		self.check_and_remove_empty_peer_state(counterparty_node_id);
+		self.per_peer_state.remove_if(counterparty_node_id, PeerState::is_empty);
 
 		result
-	}
-
-	fn check_and_remove_empty_peer_state(&self, counterparty_node_id: &PublicKey) {
-		let mut outer_state_lock = self.per_peer_state.write().unwrap();
-		let should_remove =
-			if let Some(peer_state_mutex) = outer_state_lock.get(counterparty_node_id) {
-				let peer_state = peer_state_mutex.lock().unwrap();
-				peer_state.is_empty()
-			} else {
-				false
-			};
-
-		if should_remove {
-			outer_state_lock.remove(counterparty_node_id);
-		}
 	}
 }
 
