@@ -25,8 +25,8 @@ use crate::lsps5::service::{LSPS5ServiceConfig, LSPS5ServiceHandler};
 use crate::message_queue::MessageQueue;
 use crate::peer_state::PersistedPeerStates;
 use crate::persist::{
-	read_event_queue, read_lsps2_service_peer_states, read_lsps5_service_peer_states,
-	LSPS1_SERVICE_PERSISTENCE_SECONDARY_NAMESPACE,
+	read_event_queue, read_lsps5_service_peer_states,
+	LSPS1_SERVICE_PERSISTENCE_SECONDARY_NAMESPACE, LSPS2_SERVICE_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 
 use crate::lsps1::client::{LSPS1ClientConfig, LSPS1ClientHandler};
@@ -385,13 +385,16 @@ where
 					supported_protocols.push(number);
 				}
 
-				let peer_states = read_lsps2_service_peer_states(kv_store.clone()).await?;
+				let peer_states = PersistedPeerStates::load(
+					kv_store.clone(),
+					LSPS2_SERVICE_PERSISTENCE_SECONDARY_NAMESPACE,
+				)
+				.await?;
 				Some(LSPS2ServiceHandler::new(
 					peer_states,
 					Arc::clone(&pending_messages),
 					Arc::clone(&pending_events),
 					channel_manager.clone(),
-					kv_store.clone(),
 					transaction_broadcaster.clone(),
 					lsps2_service_config.clone(),
 				)?)

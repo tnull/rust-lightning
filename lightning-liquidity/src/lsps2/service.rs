@@ -34,12 +34,12 @@ use crate::lsps2::peer_state::{
 };
 use crate::lsps2::utils::{compute_opening_fee, is_valid_opening_fee_params};
 use crate::message_queue::{MessageQueue, MessageQueueNotifierGuard};
-use crate::persist::{
-	LIQUIDITY_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, LSPS2_SERVICE_PERSISTENCE_SECONDARY_NAMESPACE,
+use crate::peer_state::{
+	get_or_insert_peer_state, PeerStateEntry, PersistedPeerStates, TooManyPeers, MAX_TOTAL_PEERS,
 };
 use crate::prelude::hash_map::Entry;
 use crate::prelude::{new_hash_map, HashMap};
-use crate::sync::{Arc, Mutex, MutexGuard, RwLock};
+use crate::sync::{Arc, MutexGuard, RwLock};
 use crate::utils::async_poll::dummy_waker;
 
 use lightning::chain::chaininterface::{BroadcasterInterface, TransactionType};
@@ -49,7 +49,6 @@ use lightning::ln::msgs::{ErrorAction, LightningError};
 use lightning::ln::types::ChannelId;
 use lightning::util::errors::APIError;
 use lightning::util::logger::Level;
-use lightning::util::ser::Writeable;
 
 use lightning_types::payment::PaymentHash;
 
@@ -67,7 +66,6 @@ use crate::lsps2::msgs::{
 
 const MAX_PENDING_REQUESTS_PER_PEER: usize = 10;
 const MAX_TOTAL_PENDING_REQUESTS: usize = 1000;
-const MAX_TOTAL_PEERS: usize = 100000;
 
 /// Server-side configuration options for JIT channels.
 #[derive(Clone, Debug)]
@@ -81,30 +79,23 @@ pub struct LSPS2ServiceConfig {
 macro_rules! get_or_insert_peer_state_entry {
 	($self: ident, $outer_state_lock: expr, $message_queue_notifier: expr, $counterparty_node_id: expr) => {{
 		// Return an internal error and abort if we hit the maximum allowed number of total peers.
-		let is_limited_by_max_total_peers = $outer_state_lock.len() >= MAX_TOTAL_PEERS;
-		match $outer_state_lock.entry(*$counterparty_node_id) {
-			Entry::Vacant(e) => {
-				if is_limited_by_max_total_peers {
-					let error_response = LSPSResponseError {
-						code: JSONRPC_INTERNAL_ERROR_ERROR_CODE,
-						message: JSONRPC_INTERNAL_ERROR_ERROR_MESSAGE.to_string(), data: None,
-					};
+		match get_or_insert_peer_state(&mut $outer_state_lock, $counterparty_node_id) {
+			Ok(inner_state_lock) => inner_state_lock,
+			Err(TooManyPeers) => {
+				let error_response = LSPSResponseError {
+					code: JSONRPC_INTERNAL_ERROR_ERROR_CODE,
+					message: JSONRPC_INTERNAL_ERROR_ERROR_MESSAGE.to_string(), data: None,
+				};
 
-					let msg = LSPSMessage::Invalid(error_response);
-					$message_queue_notifier.enqueue($counterparty_node_id, msg);
+				let msg = LSPSMessage::Invalid(error_response);
+				$message_queue_notifier.enqueue($counterparty_node_id, msg);
 
-					let err = format!(
-						"Dropping request from peer {} due to reaching maximally allowed number of total peers: {}",
-						$counterparty_node_id, MAX_TOTAL_PEERS
-					);
+				let err = format!(
+					"Dropping request from peer {} due to reaching maximally allowed number of total peers: {}",
+					$counterparty_node_id, MAX_TOTAL_PEERS
+				);
 
-					return Err(LightningError { err, action: ErrorAction::IgnoreAndLog(Level::Error) });
-				} else {
-					e.insert(Mutex::new(PeerState::new()))
-				}
-			}
-			Entry::Occupied(e) => {
-				e.into_mut()
+				return Err(LightningError { err, action: ErrorAction::IgnoreAndLog(Level::Error) });
 			}
 		}
 
@@ -117,16 +108,14 @@ where
 	CM::Target: AChannelManager,
 {
 	channel_manager: CM,
-	kv_store: K,
 	tx_broadcaster: T,
 	pending_messages: Arc<MessageQueue>,
 	pending_events: Arc<EventQueue<K>>,
-	per_peer_state: RwLock<HashMap<PublicKey, Mutex<PeerState>>>,
+	per_peer_state: PersistedPeerStates<PeerState, K>,
 	peer_by_intercept_scid: RwLock<HashMap<u64, PublicKey>>,
 	peer_by_channel_id: RwLock<HashMap<ChannelId, PublicKey>>,
 	total_pending_requests: AtomicUsize,
 	config: LSPS2ServiceConfig,
-	persistence_in_flight: AtomicUsize,
 }
 
 impl<CM: Deref, K: KVStore + Clone, T: BroadcasterInterface + Clone> LSPS2ServiceHandler<CM, K, T>
@@ -135,13 +124,13 @@ where
 {
 	/// Constructs a `LSPS2ServiceHandler`.
 	pub(crate) fn new(
-		per_peer_state: HashMap<PublicKey, Mutex<PeerState>>, pending_messages: Arc<MessageQueue>,
-		pending_events: Arc<EventQueue<K>>, channel_manager: CM, kv_store: K, tx_broadcaster: T,
+		per_peer_state: PersistedPeerStates<PeerState, K>, pending_messages: Arc<MessageQueue>,
+		pending_events: Arc<EventQueue<K>>, channel_manager: CM, tx_broadcaster: T,
 		config: LSPS2ServiceConfig,
 	) -> Result<Self, lightning::io::Error> {
 		let mut peer_by_intercept_scid = new_hash_map();
 		let mut peer_by_channel_id = new_hash_map();
-		for (node_id, peer_state) in per_peer_state.iter() {
+		for (node_id, peer_state) in per_peer_state.read().unwrap().iter() {
 			let peer_state_lock = peer_state.lock().unwrap();
 			for (intercept_scid, _) in peer_state_lock.outbound_channels_by_intercept_scid.iter() {
 				let res = peer_by_intercept_scid.insert(*intercept_scid, *node_id);
@@ -169,13 +158,11 @@ where
 		Ok(Self {
 			pending_messages,
 			pending_events,
-			per_peer_state: RwLock::new(per_peer_state),
+			per_peer_state,
 			peer_by_intercept_scid: RwLock::new(peer_by_intercept_scid),
 			peer_by_channel_id: RwLock::new(peer_by_channel_id),
 			total_pending_requests: AtomicUsize::new(0),
-			persistence_in_flight: AtomicUsize::new(0),
 			channel_manager,
-			kv_store,
 			tx_broadcaster,
 			config,
 		})
@@ -317,7 +304,6 @@ where
 		cltv_expiry_delta: u32, client_trusts_lsp: bool, user_channel_id: u128,
 	) -> Result<(), APIError> {
 		let mut message_queue_notifier = self.pending_messages.notifier();
-		let mut should_persist = false;
 
 		match self.per_peer_state.read().unwrap().get(counterparty_node_id) {
 			Some(inner_state_lock) => {
@@ -342,8 +328,9 @@ where
 							.intercept_scid_by_user_channel_id
 							.insert(user_channel_id, intercept_scid);
 						peer_state_lock
-							.insert_outbound_channel(intercept_scid, outbound_jit_channel);
-						should_persist |= peer_state_lock.needs_persist;
+							.outbound_channels_by_intercept_scid
+							.insert(intercept_scid, outbound_jit_channel);
+						peer_state_lock.needs_persist = true;
 
 						let response = LSPS2Response::Buy(LSPS2BuyResponse {
 							jit_channel_scid: intercept_scid.into(),
@@ -367,16 +354,11 @@ where
 			},
 		};
 
-		if should_persist {
-			self.persist_peer_state(*counterparty_node_id).await.map_err(|e| {
-				APIError::APIMisuseError {
-					err: format!(
-						"Failed to persist peer state for {}: {}",
-						counterparty_node_id, e
-					),
-				}
-			})?;
-		}
+		self.per_peer_state.persist_peer_state(*counterparty_node_id).await.map_err(|e| {
+			APIError::APIMisuseError {
+				err: format!("Failed to persist peer state for {}: {}", counterparty_node_id, e),
+			}
+		})?;
 
 		Ok(())
 	}
@@ -504,7 +486,7 @@ where
 		}
 
 		if let Some(counterparty_node_id) = should_persist {
-			self.persist_peer_state(counterparty_node_id).await.map_err(|e| {
+			self.per_peer_state.persist_peer_state(counterparty_node_id).await.map_err(|e| {
 				APIError::APIMisuseError {
 					err: format!(
 						"Failed to persist peer state for {}: {}",
@@ -585,7 +567,7 @@ where
 		}
 
 		if let Some(counterparty_node_id) = should_persist {
-			self.persist_peer_state(counterparty_node_id).await.map_err(|e| {
+			self.per_peer_state.persist_peer_state(counterparty_node_id).await.map_err(|e| {
 				APIError::APIMisuseError {
 					err: format!(
 						"Failed to persist peer state for {}: {}",
@@ -671,7 +653,7 @@ where
 		}
 
 		if let Some(counterparty_node_id) = should_persist {
-			self.persist_peer_state(counterparty_node_id).await.map_err(|e| {
+			self.per_peer_state.persist_peer_state(counterparty_node_id).await.map_err(|e| {
 				APIError::APIMisuseError {
 					err: format!(
 						"Failed to persist peer state for {}: {}",
@@ -701,7 +683,10 @@ where
 			match outer_state_lock.get(&counterparty_node_id) {
 				Some(inner_state_lock) => {
 					let mut peer_state = inner_state_lock.lock().unwrap();
-					peer_state.remove_terminal_channel_state(channel_id)
+					let removed_intercept_scid =
+						peer_state.remove_terminal_channel_state(channel_id);
+					peer_state.needs_persist |= removed_intercept_scid.is_some();
+					removed_intercept_scid
 				},
 				None => None,
 			}
@@ -710,7 +695,7 @@ where
 		if let Some(intercept_scid) = removed_intercept_scid {
 			self.peer_by_intercept_scid.write().unwrap().remove(&intercept_scid);
 			self.peer_by_channel_id.write().unwrap().remove(&channel_id);
-			self.persist_peer_state(counterparty_node_id).await.map_err(|e| {
+			self.per_peer_state.persist_peer_state(counterparty_node_id).await.map_err(|e| {
 				APIError::APIMisuseError {
 					err: format!(
 						"Failed to persist peer state after channel {} closed: {}",
@@ -794,7 +779,7 @@ where
 			peer_state.needs_persist |= true;
 		}
 
-		self.persist_peer_state(*counterparty_node_id).await.map_err(|e| {
+		self.per_peer_state.persist_peer_state(*counterparty_node_id).await.map_err(|e| {
 			APIError::APIMisuseError {
 				err: format!("Failed to persist peer state for {}: {}", counterparty_node_id, e),
 			}
@@ -865,7 +850,7 @@ where
 
 			peer_state.needs_persist |= true;
 		}
-		self.persist_peer_state(*counterparty_node_id).await.map_err(|e| {
+		self.per_peer_state.persist_peer_state(*counterparty_node_id).await.map_err(|e| {
 			APIError::APIMisuseError {
 				err: format!("Failed to persist peer state for {}: {}", counterparty_node_id, e),
 			}
@@ -953,7 +938,7 @@ where
 		}
 
 		if should_persist {
-			self.persist_peer_state(*counterparty_node_id).await.map_err(|e| {
+			self.per_peer_state.persist_peer_state(*counterparty_node_id).await.map_err(|e| {
 				APIError::APIMisuseError {
 					err: format!(
 						"Failed to persist peer state for {}: {}",
@@ -1122,7 +1107,7 @@ where
 	}
 
 	fn insert_pending_request<'a>(
-		&self, peer_state_lock: &mut MutexGuard<'a, PeerState>,
+		&self, peer_state_lock: &mut MutexGuard<'a, PeerStateEntry<PeerState>>,
 		message_queue_notifier: &mut MessageQueueNotifierGuard, request_id: LSPSRequestId,
 		counterparty_node_id: PublicKey, request: LSPS2Request,
 	) -> Result<(), LightningError> {
@@ -1186,7 +1171,8 @@ where
 	}
 
 	fn remove_pending_request<'a>(
-		&self, peer_state_lock: &mut MutexGuard<'a, PeerState>, request_id: &LSPSRequestId,
+		&self, peer_state_lock: &mut MutexGuard<'a, PeerStateEntry<PeerState>>,
+		request_id: &LSPSRequestId,
 	) -> Option<LSPS2Request> {
 		match peer_state_lock.pending_requests.remove(request_id) {
 			Some(req) => {
@@ -1227,143 +1213,8 @@ where
 		);
 	}
 
-	async fn persist_peer_state(
-		&self, counterparty_node_id: PublicKey,
-	) -> Result<(), lightning::io::Error> {
-		let fut = {
-			let outer_state_lock = self.per_peer_state.read().unwrap();
-			match outer_state_lock.get(&counterparty_node_id) {
-				None => {
-					// We dropped the peer state by now.
-					return Ok(());
-				},
-				Some(entry) => {
-					let mut peer_state_lock = entry.lock().unwrap();
-					if !peer_state_lock.needs_persist {
-						// We already have persisted otherwise by now.
-						return Ok(());
-					} else {
-						peer_state_lock.needs_persist = false;
-						let key = counterparty_node_id.to_string();
-						let encoded = peer_state_lock.encode();
-						// Begin the write with the entry lock held. This avoids racing with
-						// potentially-in-flight `persist` calls writing state for the same peer.
-						self.kv_store.write(
-							LIQUIDITY_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-							LSPS2_SERVICE_PERSISTENCE_SECONDARY_NAMESPACE,
-							&key,
-							encoded,
-						)
-					}
-				},
-			}
-		};
-
-		fut.await.map_err(|e| {
-			self.per_peer_state
-				.read()
-				.unwrap()
-				.get(&counterparty_node_id)
-				.map(|p| p.lock().unwrap().needs_persist = true);
-			e
-		})
-	}
-
 	pub(crate) async fn persist(&self) -> Result<bool, lightning::io::Error> {
-		// TODO: We should eventually persist in parallel, however, when we do, we probably want to
-		// introduce some batching to upper-bound the number of requests inflight at any given
-		// time.
-
-		if self.persistence_in_flight.fetch_add(1, Ordering::AcqRel) > 0 {
-			// If we're not the first event processor to get here, just return early, the increment
-			// we just did will be treated as "go around again" at the end.
-			return Ok(false);
-		}
-
-		let res = self.do_persist().await;
-		debug_assert!(res.is_err() || self.persistence_in_flight.load(Ordering::Acquire) == 0);
-		self.persistence_in_flight.store(0, Ordering::Release);
-		res
-	}
-
-	async fn do_persist(&self) -> Result<bool, lightning::io::Error> {
-		let mut did_persist = false;
-
-		loop {
-			let mut need_remove = Vec::new();
-			let mut need_persist = Vec::new();
-
-			{
-				// First build a list of peers to persist and prune with the read lock. This allows
-				// us to avoid the write lock unless we actually need to remove a node.
-				let outer_state_lock = self.per_peer_state.read().unwrap();
-				for (counterparty_node_id, inner_state_lock) in outer_state_lock.iter() {
-					let mut peer_state_lock = inner_state_lock.lock().unwrap();
-					peer_state_lock.prune_expired_request_state();
-					let is_prunable = peer_state_lock.is_prunable();
-					if is_prunable {
-						need_remove.push(*counterparty_node_id);
-					} else if peer_state_lock.needs_persist {
-						need_persist.push(*counterparty_node_id);
-					}
-				}
-			}
-
-			for counterparty_node_id in need_persist.into_iter() {
-				debug_assert!(!need_remove.contains(&counterparty_node_id));
-				self.persist_peer_state(counterparty_node_id).await?;
-				did_persist = true;
-			}
-
-			for counterparty_node_id in need_remove {
-				let mut future_opt = None;
-				{
-					// We need to take the `per_peer_state` write lock to remove an entry, but also
-					// have to hold it until after the `remove` call returns (but not through
-					// future completion) to ensure that writes for the peer's state are
-					// well-ordered with other `persist_peer_state` calls even across the removal
-					// itself.
-					let mut per_peer_state = self.per_peer_state.write().unwrap();
-					if let Entry::Occupied(mut entry) = per_peer_state.entry(counterparty_node_id) {
-						let state = entry.get_mut().get_mut().unwrap();
-						if state.is_prunable() {
-							entry.remove();
-							let key = counterparty_node_id.to_string();
-							future_opt = Some(self.kv_store.remove(
-								LIQUIDITY_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-								LSPS2_SERVICE_PERSISTENCE_SECONDARY_NAMESPACE,
-								&key,
-								true,
-							));
-						} else {
-							// If the peer got new state, force a re-persist of the current state.
-							state.needs_persist = true;
-						}
-					} else {
-						// This should never happen, we can only have one `persist` call
-						// in-progress at once and map entries are only removed by it.
-						debug_assert!(false);
-					}
-				}
-				if let Some(future) = future_opt {
-					future.await?;
-					did_persist = true;
-				} else {
-					self.persist_peer_state(counterparty_node_id).await?;
-					did_persist = true;
-				}
-			}
-
-			if self.persistence_in_flight.fetch_sub(1, Ordering::AcqRel) != 1 {
-				// If another thread incremented the state while we were running we should go
-				// around again, but only once.
-				self.persistence_in_flight.store(1, Ordering::Release);
-				continue;
-			}
-			break;
-		}
-
-		Ok(did_persist)
+		self.per_peer_state.persist(&mut ()).await
 	}
 
 	pub(crate) fn peer_disconnected(&self, counterparty_node_id: PublicKey) {
@@ -1373,7 +1224,9 @@ where
 			// We clean up the peer state, but leave removing the peer entry to the prune logic in
 			// `persist` which removes it from the store.
 			peer_state_lock.prune_pending_requests();
-			peer_state_lock.prune_expired_request_state();
+			if peer_state_lock.prune_expired_request_state() {
+				peer_state_lock.needs_persist = true;
+			}
 		}
 	}
 

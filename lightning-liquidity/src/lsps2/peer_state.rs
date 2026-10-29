@@ -17,6 +17,7 @@ use crate::lsps2::msgs::LSPS2OpeningFeeParams;
 use crate::lsps2::msgs::LSPS2Request;
 use crate::lsps2::payment_queue::{InterceptedHTLC, PaymentQueue};
 use crate::lsps2::utils::{compute_opening_fee, is_expired_opening_fee_params};
+use crate::peer_state::PrunablePeerState;
 use crate::prelude::{new_hash_map, HashMap};
 
 use lightning::ln::msgs::{ErrorAction, LightningError};
@@ -24,6 +25,7 @@ use lightning::ln::types::ChannelId;
 use lightning::util::logger::Level;
 use lightning::{impl_ser_tlv_based, impl_ser_tlv_based_enum};
 
+use bitcoin::secp256k1::PublicKey;
 use bitcoin::Transaction;
 
 /// Information about the initial payment size and JIT channel opening fee.
@@ -548,32 +550,24 @@ pub(crate) struct PeerState {
 	pub(super) intercept_scid_by_user_channel_id: HashMap<u128, u64>,
 	pub(super) intercept_scid_by_channel_id: HashMap<ChannelId, u64>,
 	pub(super) pending_requests: HashMap<LSPSRequestId, LSPS2Request>,
-	pub(super) needs_persist: bool,
 }
 
-impl PeerState {
-	pub(super) fn new() -> Self {
+impl Default for PeerState {
+	fn default() -> Self {
 		let outbound_channels_by_intercept_scid = new_hash_map();
 		let pending_requests = new_hash_map();
 		let intercept_scid_by_user_channel_id = new_hash_map();
 		let intercept_scid_by_channel_id = new_hash_map();
-		let needs_persist = false;
 		Self {
 			outbound_channels_by_intercept_scid,
 			pending_requests,
 			intercept_scid_by_user_channel_id,
 			intercept_scid_by_channel_id,
-			needs_persist,
 		}
 	}
+}
 
-	pub(super) fn insert_outbound_channel(
-		&mut self, intercept_scid: u64, channel: OutboundJITChannel,
-	) {
-		self.outbound_channels_by_intercept_scid.insert(intercept_scid, channel);
-		self.needs_persist |= true;
-	}
-
+impl PeerState {
 	pub(super) fn prune_pending_requests(&mut self) {
 		self.pending_requests.retain(|_, entry| {
 			match entry {
@@ -586,17 +580,19 @@ impl PeerState {
 		});
 	}
 
-	pub(super) fn prune_expired_request_state(&mut self) {
+	pub(super) fn prune_expired_request_state(&mut self) -> bool {
+		let mut pruned = false;
 		self.outbound_channels_by_intercept_scid.retain(|intercept_scid, entry| {
 			if entry.is_prunable() {
 				// We abort the flow, and prune any data kept.
 				self.intercept_scid_by_channel_id.retain(|_, iscid| intercept_scid != iscid);
 				self.intercept_scid_by_user_channel_id.retain(|_, iscid| intercept_scid != iscid);
-				self.needs_persist |= true;
+				pruned = true;
 				return false;
 			}
 			true
 		});
+		pruned
 	}
 
 	pub(super) fn remove_terminal_channel_state(&mut self, channel_id: ChannelId) -> Option<u64> {
@@ -614,7 +610,6 @@ impl PeerState {
 		self.outbound_channels_by_intercept_scid.remove(&intercept_scid);
 		self.intercept_scid_by_channel_id.remove(&channel_id);
 		self.intercept_scid_by_user_channel_id.retain(|_, iscid| *iscid != intercept_scid);
-		self.needs_persist = true;
 
 		Some(intercept_scid)
 	}
@@ -628,11 +623,6 @@ impl PeerState {
 			.count();
 		pending_requests + pending_outbound_channels
 	}
-
-	pub(super) fn is_prunable(&self) -> bool {
-		// Return whether the entire state is empty.
-		self.pending_requests.is_empty() && self.outbound_channels_by_intercept_scid.is_empty()
-	}
 }
 
 impl_ser_tlv_based!(PeerState, {
@@ -640,8 +630,20 @@ impl_ser_tlv_based!(PeerState, {
 	(2, intercept_scid_by_user_channel_id, required),
 	(4, intercept_scid_by_channel_id, required),
 	(_unused, pending_requests, (static_value, new_hash_map())),
-	(_unused, needs_persist, (static_value, false)),
 });
+
+impl PrunablePeerState for PeerState {
+	type PruneContext = ();
+
+	fn prune_expired(&mut self, _counterparty_node_id: &PublicKey, _ctx: &mut ()) -> bool {
+		self.prune_expired_request_state()
+	}
+
+	fn is_prunable(&self, _counterparty_node_id: &PublicKey, _ctx: &()) -> bool {
+		// Return whether the entire state is empty.
+		self.pending_requests.is_empty() && self.outbound_channels_by_intercept_scid.is_empty()
+	}
+}
 
 #[cfg(test)]
 mod tests {
@@ -1004,9 +1006,9 @@ mod tests {
 			Some(HTLCInterceptedAction::OpenChannel(_))
 		));
 
-		let mut peer_state = PeerState::new();
+		let mut peer_state = PeerState::default();
 		peer_state.intercept_scid_by_user_channel_id.insert(user_channel_id, intercept_scid);
-		peer_state.insert_outbound_channel(intercept_scid, jit_channel);
+		peer_state.outbound_channels_by_intercept_scid.insert(intercept_scid, jit_channel);
 
 		let encoded_peer_state = peer_state.encode();
 		let mut decoded_peer_state = PeerState::read(&mut Cursor::new(encoded_peer_state)).unwrap();
@@ -1050,9 +1052,13 @@ mod tests {
 		live_jit_channel.state =
 			OutboundJITChannelState::PaymentForwarded { channel_id: live_channel_id };
 
-		let mut peer_state = PeerState::new();
-		peer_state.insert_outbound_channel(stale_intercept_scid, stale_jit_channel);
-		peer_state.insert_outbound_channel(live_intercept_scid, live_jit_channel);
+		let mut peer_state = PeerState::default();
+		peer_state
+			.outbound_channels_by_intercept_scid
+			.insert(stale_intercept_scid, stale_jit_channel);
+		peer_state
+			.outbound_channels_by_intercept_scid
+			.insert(live_intercept_scid, live_jit_channel);
 		peer_state
 			.intercept_scid_by_user_channel_id
 			.insert(stale_user_channel_id, stale_intercept_scid);
@@ -1061,7 +1067,6 @@ mod tests {
 			.insert(live_user_channel_id, live_intercept_scid);
 		peer_state.intercept_scid_by_channel_id.insert(stale_channel_id, stale_intercept_scid);
 		peer_state.intercept_scid_by_channel_id.insert(live_channel_id, live_intercept_scid);
-		peer_state.needs_persist = false;
 
 		assert_eq!(
 			peer_state.remove_terminal_channel_state(stale_channel_id),
@@ -1081,11 +1086,8 @@ mod tests {
 			peer_state.intercept_scid_by_channel_id.get(&live_channel_id),
 			Some(&live_intercept_scid)
 		);
-		assert!(peer_state.needs_persist);
 
-		peer_state.needs_persist = false;
 		assert_eq!(peer_state.remove_terminal_channel_state(stale_channel_id), None);
-		assert!(!peer_state.needs_persist);
 	}
 
 	#[test]
