@@ -12,8 +12,9 @@ use crate::lsps0::msgs::{
 };
 use crate::lsps0::ser::{LSPSProtocolMessageHandler, LSPSRequestId, LSPSResponseError};
 use crate::message_queue::MessageQueue;
-use crate::prelude::{new_hash_map, new_hash_set, HashMap, HashSet};
-use crate::sync::{Arc, Mutex, RwLock};
+use crate::peer_state::PeerStates;
+use crate::prelude::{new_hash_set, HashSet};
+use crate::sync::{Arc, Mutex};
 use crate::utils;
 
 use lightning::ln::msgs::{ErrorAction, LightningError};
@@ -39,7 +40,7 @@ pub struct LSPS0ClientHandler<ES: EntropySource, K: KVStore + Clone> {
 	entropy_source: ES,
 	pending_messages: Arc<MessageQueue>,
 	pending_events: Arc<EventQueue<K>>,
-	per_peer_state: RwLock<HashMap<PublicKey, Mutex<PeerState>>>,
+	per_peer_state: PeerStates<PeerState>,
 }
 
 impl<ES: EntropySource, K: KVStore + Clone> LSPS0ClientHandler<ES, K> {
@@ -47,12 +48,7 @@ impl<ES: EntropySource, K: KVStore + Clone> LSPS0ClientHandler<ES, K> {
 	pub(crate) fn new(
 		entropy_source: ES, pending_messages: Arc<MessageQueue>, pending_events: Arc<EventQueue<K>>,
 	) -> Self {
-		Self {
-			entropy_source,
-			pending_messages,
-			pending_events,
-			per_peer_state: RwLock::new(new_hash_map()),
-		}
+		Self { entropy_source, pending_messages, pending_events, per_peer_state: PeerStates::new() }
 	}
 
 	/// Calls bLIP-50 / LSPS0's `list_protocols`.
@@ -145,6 +141,9 @@ impl<ES: EntropySource, K: KVStore + Clone> LSPSProtocolMessageHandler
 						},
 					}
 				}
+				self.per_peer_state.remove_if(counterparty_node_id, |peer_state| {
+					peer_state.pending_list_protocols_requests.is_empty()
+				});
 				self.handle_response(response, counterparty_node_id)
 			},
 			LSPS0Message::Request(..) => {
@@ -299,5 +298,8 @@ mod tests {
 			})] => assert_eq!(*event_peer, counterparty_node_id),
 			_ => panic!("Unexpected event"),
 		}
+
+		// With no requests pending anymore, the peer's state was dropped.
+		assert!(!handler.per_peer_state.read().unwrap().contains_key(&counterparty_node_id));
 	}
 }
