@@ -18,6 +18,7 @@
 pub mod client;
 pub mod event;
 pub mod msgs;
+pub(crate) mod peer_state;
 pub mod service;
 pub mod url_utils;
 pub mod validator;

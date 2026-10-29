@@ -10,7 +10,7 @@
 //! Types and utils for persistence.
 
 use crate::events::{EventQueueDeserWrapper, LiquidityEvent};
-use crate::lsps5::service::PeerState as LSPS5ServicePeerState;
+use crate::lsps5::peer_state::PeerState as LSPS5ServicePeerState;
 use crate::prelude::{new_hash_map, HashMap};
 
 use lightning::io::Cursor;
