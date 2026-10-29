@@ -15,10 +15,13 @@ use super::msgs::{
 };
 
 use crate::lsps0::ser::{LSPSDateTime, LSPSRequestId};
+use crate::peer_state::PrunablePeerState;
 use crate::prelude::HashMap;
 
 use lightning::util::hash_tables::new_hash_map;
 use lightning::{impl_ser_tlv_based, impl_ser_tlv_based_enum};
+
+use bitcoin::secp256k1::PublicKey;
 
 use core::fmt;
 
@@ -271,7 +274,6 @@ impl_ser_tlv_based_enum!(ChannelOrderState,
 pub(crate) struct PeerState {
 	outbound_channels_by_order_id: HashMap<LSPS1OrderId, ChannelOrder>,
 	pending_requests: HashMap<LSPSRequestId, LSPS1Request>,
-	needs_persist: bool,
 }
 
 impl PeerState {
@@ -282,7 +284,6 @@ impl PeerState {
 		let state = ChannelOrderState::new(payment_details);
 		let channel_order = ChannelOrder { order_params, state, created_at };
 		self.outbound_channels_by_order_id.insert(order_id, channel_order.clone());
-		self.needs_persist |= true;
 		channel_order
 	}
 
@@ -307,7 +308,6 @@ impl PeerState {
 			.get_mut(order_id)
 			.ok_or(PeerStateError::UnknownOrderId)?;
 		order.state.payment_received(method).map_err(PeerStateError::InvalidStateTransition)?;
-		self.needs_persist |= true;
 		Ok(())
 	}
 
@@ -320,7 +320,6 @@ impl PeerState {
 			.get_mut(order_id)
 			.ok_or(PeerStateError::UnknownOrderId)?;
 		order.state.channel_opened(channel_info).map_err(PeerStateError::InvalidStateTransition)?;
-		self.needs_persist |= true;
 		Ok(())
 	}
 
@@ -335,7 +334,6 @@ impl PeerState {
 			.get_mut(order_id)
 			.ok_or(PeerStateError::UnknownOrderId)?;
 		order.state.mark_failed_and_refunded().map_err(PeerStateError::InvalidStateTransition)?;
-		self.needs_persist |= true;
 		Ok(())
 	}
 
@@ -368,33 +366,16 @@ impl PeerState {
 		!self.outbound_channels_by_order_id.is_empty()
 	}
 
-	pub(super) fn needs_persist(&self) -> bool {
-		self.needs_persist
-	}
-
-	pub(super) fn set_needs_persist(&mut self, needs_persist: bool) {
-		self.needs_persist = needs_persist;
-	}
-
-	pub(super) fn is_prunable(&self) -> bool {
-		// Return whether the entire state is empty.
-		self.pending_requests.is_empty() && self.outbound_channels_by_order_id.is_empty()
-	}
-
 	pub(super) fn prune_pending_requests(&mut self) -> usize {
 		let num_pruned = self.pending_requests.len();
 		self.pending_requests.clear();
 		num_pruned
 	}
 
-	pub(super) fn prune_expired_request_state(&mut self, now: LSPSDateTime) {
-		self.outbound_channels_by_order_id.retain(|_order_id, entry| {
-			if entry.is_prunable(now) {
-				self.needs_persist |= true;
-				return false;
-			}
-			true
-		});
+	pub(super) fn prune_expired_request_state(&mut self, now: LSPSDateTime) -> bool {
+		let num_orders = self.outbound_channels_by_order_id.len();
+		self.outbound_channels_by_order_id.retain(|_order_id, entry| !entry.is_prunable(now));
+		self.outbound_channels_by_order_id.len() != num_orders
 	}
 
 	fn pending_requests_and_unpaid_orders(&self) -> usize {
@@ -418,8 +399,20 @@ impl PeerState {
 impl_ser_tlv_based!(PeerState, {
 	(0, outbound_channels_by_order_id, required),
 	(_unused, pending_requests, (static_value, new_hash_map())),
-	(_unused, needs_persist, (static_value, false)),
 });
+
+impl PrunablePeerState for PeerState {
+	type PruneContext = LSPSDateTime;
+
+	fn prune_expired(&mut self, _counterparty_node_id: &PublicKey, now: &mut LSPSDateTime) -> bool {
+		self.prune_expired_request_state(*now)
+	}
+
+	fn is_prunable(&self, _counterparty_node_id: &PublicKey, _now: &LSPSDateTime) -> bool {
+		// Return whether the entire state is empty.
+		self.pending_requests.is_empty() && self.outbound_channels_by_order_id.is_empty()
+	}
+}
 
 #[derive(Debug, Clone)]
 pub(super) enum PeerStateError {

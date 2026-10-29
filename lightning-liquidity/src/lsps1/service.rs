@@ -10,12 +10,10 @@
 //! Contains the main bLIP-51 / LSPS1 server object, [`LSPS1ServiceHandler`].
 
 use alloc::string::ToString;
-use alloc::vec::Vec;
 
 use core::future::Future as StdFuture;
 use core::ops::Deref;
 use core::pin::pin;
-use core::sync::atomic::{AtomicUsize, Ordering};
 use core::task;
 
 use super::event::LSPS1ServiceEvent;
@@ -30,18 +28,14 @@ use super::msgs::{
 pub use super::peer_state::PaymentMethod;
 use super::peer_state::PeerState;
 use crate::message_queue::MessageQueue;
+use crate::peer_state::{get_or_insert_peer_state, PersistedPeerStates, MAX_TOTAL_PEERS};
 
 use crate::events::EventQueue;
 use crate::lsps0::ser::{
 	LSPSDateTime, LSPSProtocolMessageHandler, LSPSRequestId, LSPSResponseError,
 	LSPS0_CLIENT_REJECTED_ERROR_CODE,
 };
-use crate::persist::{
-	LIQUIDITY_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, LSPS1_SERVICE_PERSISTENCE_SECONDARY_NAMESPACE,
-};
-use crate::prelude::hash_map::Entry;
-use crate::prelude::HashMap;
-use crate::sync::{Arc, Mutex, RwLock};
+use crate::sync::Arc;
 use crate::utils;
 use crate::utils::async_poll::dummy_waker;
 use crate::utils::time::TimeProvider;
@@ -52,7 +46,6 @@ use lightning::sign::EntropySource;
 use lightning::util::errors::APIError;
 use lightning::util::logger::Level;
 use lightning::util::persist::KVStore;
-use lightning::util::ser::Writeable;
 
 use bitcoin::secp256k1::PublicKey;
 
@@ -62,8 +55,6 @@ pub struct LSPS1ServiceConfig {
 	/// The options supported by the LSP.
 	pub supported_options: LSPS1Options,
 }
-
-const MAX_TOTAL_PEERS: usize = 100000;
 
 /// The main object allowing to send and receive bLIP-51 / LSPS1 messages.
 pub struct LSPS1ServiceHandler<
@@ -77,11 +68,9 @@ pub struct LSPS1ServiceHandler<
 {
 	entropy_source: ES,
 	_channel_manager: CM,
-	kv_store: K,
 	pending_messages: Arc<MessageQueue>,
 	pending_events: Arc<EventQueue<K>>,
-	per_peer_state: RwLock<HashMap<PublicKey, Mutex<PeerState>>>,
-	persistence_in_flight: AtomicUsize,
+	per_peer_state: PersistedPeerStates<PeerState, K>,
 	time_provider: TP,
 	config: LSPS1ServiceConfig,
 }
@@ -94,18 +83,16 @@ where
 {
 	/// Constructs a `LSPS1ServiceHandler`.
 	pub(crate) fn new(
-		per_peer_state: HashMap<PublicKey, Mutex<PeerState>>, entropy_source: ES,
+		per_peer_state: PersistedPeerStates<PeerState, K>, entropy_source: ES,
 		pending_messages: Arc<MessageQueue>, pending_events: Arc<EventQueue<K>>,
-		channel_manager: CM, kv_store: K, time_provider: TP, config: LSPS1ServiceConfig,
+		channel_manager: CM, time_provider: TP, config: LSPS1ServiceConfig,
 	) -> Self {
 		Self {
 			entropy_source,
 			_channel_manager: channel_manager,
-			kv_store,
 			pending_messages,
 			pending_events,
-			per_peer_state: RwLock::new(per_peer_state),
-			persistence_in_flight: AtomicUsize::new(0),
+			per_peer_state,
 			time_provider,
 			config,
 		}
@@ -137,153 +124,20 @@ where
 			// We clean up the peer state, but leave removing the peer entry to the prune logic in
 			// `persist` which removes it from the store.
 			peer_state_lock.prune_pending_requests();
-			peer_state_lock.prune_expired_request_state(
+			if peer_state_lock.prune_expired_request_state(
 				LSPSDateTime::new_from_duration_since_epoch(
 					self.time_provider.duration_since_epoch(),
 				),
-			);
+			) {
+				peer_state_lock.needs_persist = true;
+			}
 		}
 	}
 
 	pub(crate) async fn persist(&self) -> Result<bool, lightning::io::Error> {
-		// TODO: We should eventually persist in parallel, however, when we do, we probably want to
-		// introduce some batching to upper-bound the number of requests inflight at any given
-		// time.
-
-		if self.persistence_in_flight.fetch_add(1, Ordering::AcqRel) > 0 {
-			// If we're not the first event processor to get here, just return early, the increment
-			// we just did will be treated as "go around again" at the end.
-			return Ok(false);
-		}
-
-		let res = self.do_persist().await;
-		debug_assert!(res.is_err() || self.persistence_in_flight.load(Ordering::Acquire) == 0);
-		self.persistence_in_flight.store(0, Ordering::Release);
-		res
-	}
-
-	async fn do_persist(&self) -> Result<bool, lightning::io::Error> {
-		let mut did_persist = false;
-
-		loop {
-			let mut need_remove = Vec::new();
-			let mut need_persist = Vec::new();
-
-			{
-				let now = LSPSDateTime::new_from_duration_since_epoch(
-					self.time_provider.duration_since_epoch(),
-				);
-				// First build a list of peers to persist and prune with the read lock. This allows
-				// us to avoid the write lock unless we actually need to remove a node.
-				let outer_state_lock = self.per_peer_state.read().unwrap();
-				for (counterparty_node_id, inner_state_lock) in outer_state_lock.iter() {
-					let mut peer_state_lock = inner_state_lock.lock().unwrap();
-					peer_state_lock.prune_expired_request_state(now);
-					let is_prunable = peer_state_lock.is_prunable();
-					if is_prunable {
-						need_remove.push(*counterparty_node_id);
-					} else if peer_state_lock.needs_persist() {
-						need_persist.push(*counterparty_node_id);
-					}
-				}
-			}
-
-			for counterparty_node_id in need_persist.into_iter() {
-				debug_assert!(!need_remove.contains(&counterparty_node_id));
-				self.persist_peer_state(counterparty_node_id).await?;
-				did_persist = true;
-			}
-
-			for counterparty_node_id in need_remove {
-				let mut future_opt = None;
-				{
-					// We need to take the `per_peer_state` write lock to remove an entry, but also
-					// have to hold it until after the `remove` call returns (but not through
-					// future completion) to ensure that writes for the peer's state are
-					// well-ordered with other `persist_peer_state` calls even across the removal
-					// itself.
-					let mut per_peer_state = self.per_peer_state.write().unwrap();
-					if let Entry::Occupied(mut entry) = per_peer_state.entry(counterparty_node_id) {
-						let state = entry.get_mut().get_mut().unwrap();
-						if state.is_prunable() {
-							entry.remove();
-							let key = counterparty_node_id.to_string();
-							future_opt = Some(self.kv_store.remove(
-								LIQUIDITY_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-								LSPS1_SERVICE_PERSISTENCE_SECONDARY_NAMESPACE,
-								&key,
-								true,
-							));
-						} else {
-							// If the peer got new state, force a re-persist of the current state.
-							state.set_needs_persist(true);
-						}
-					} else {
-						// This should never happen, we can only have one `persist` call
-						// in-progress at once and map entries are only removed by it.
-						debug_assert!(false);
-					}
-				}
-				if let Some(future) = future_opt {
-					future.await?;
-					did_persist = true;
-				} else {
-					self.persist_peer_state(counterparty_node_id).await?;
-				}
-			}
-
-			if self.persistence_in_flight.fetch_sub(1, Ordering::AcqRel) != 1 {
-				// If another thread incremented the state while we were running we should go
-				// around again, but only once.
-				self.persistence_in_flight.store(1, Ordering::Release);
-				continue;
-			}
-			break;
-		}
-
-		Ok(did_persist)
-	}
-
-	async fn persist_peer_state(
-		&self, counterparty_node_id: PublicKey,
-	) -> Result<(), lightning::io::Error> {
-		let fut = {
-			let outer_state_lock = self.per_peer_state.read().unwrap();
-			match outer_state_lock.get(&counterparty_node_id) {
-				None => {
-					// We dropped the peer state by now.
-					return Ok(());
-				},
-				Some(entry) => {
-					let mut peer_state_lock = entry.lock().unwrap();
-					if !peer_state_lock.needs_persist() {
-						// We already have persisted otherwise by now.
-						return Ok(());
-					} else {
-						peer_state_lock.set_needs_persist(false);
-						let key = counterparty_node_id.to_string();
-						let encoded = peer_state_lock.encode();
-						// Begin the write with the entry lock held. This avoids racing with
-						// potentially-in-flight `persist` calls writing state for the same peer.
-						self.kv_store.write(
-							LIQUIDITY_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-							LSPS1_SERVICE_PERSISTENCE_SECONDARY_NAMESPACE,
-							&key,
-							encoded,
-						)
-					}
-				},
-			}
-		};
-
-		fut.await.map_err(|e| {
-			self.per_peer_state
-				.read()
-				.unwrap()
-				.get(&counterparty_node_id)
-				.map(|p| p.lock().unwrap().set_needs_persist(true));
-			e
-		})
+		let mut now =
+			LSPSDateTime::new_from_duration_since_epoch(self.time_provider.duration_since_epoch());
+		self.per_peer_state.persist(&mut now).await
 	}
 
 	fn handle_get_info_request(
@@ -326,11 +180,9 @@ where
 
 		{
 			let mut outer_state_lock = self.per_peer_state.write().unwrap();
-			let num_peers = outer_state_lock.len();
-
-			let inner_state_entry = outer_state_lock.entry(*counterparty_node_id);
-
-			if matches!(inner_state_entry, Entry::Vacant(_)) && num_peers >= MAX_TOTAL_PEERS {
+			let Ok(inner_state_lock) =
+				get_or_insert_peer_state(&mut outer_state_lock, counterparty_node_id)
+			else {
 				let response = LSPS1Response::CreateOrderError(LSPSResponseError {
 					code: LSPS0_CLIENT_REJECTED_ERROR_CODE,
 					message: "Reached maximum number of pending requests. Please try again later."
@@ -346,10 +198,9 @@ where
 					),
 					action: ErrorAction::IgnoreAndLog(Level::Debug),
 				});
-			}
+			};
 
-			let mut peer_state_lock =
-				inner_state_entry.or_insert(Mutex::new(PeerState::default())).lock().unwrap();
+			let mut peer_state_lock = inner_state_lock.lock().unwrap();
 
 			let request = LSPS1Request::CreateOrder(params.clone());
 			peer_state_lock.register_request(request_id.clone(), request).map_err(|e| {
@@ -390,7 +241,6 @@ where
 		payment_details: LSPS1PaymentInfo,
 	) -> Result<(), APIError> {
 		let mut message_queue_notifier = self.pending_messages.notifier();
-		let mut should_persist = false;
 
 		if payment_details.bolt11.is_none()
 			&& payment_details.bolt12.is_none()
@@ -458,7 +308,7 @@ where
 							created_at,
 							payment_details,
 						);
-						should_persist |= peer_state_lock.needs_persist();
+						peer_state_lock.needs_persist = true;
 
 						let response = LSPS1Response::CreateOrder(LSPS1CreateOrderResponse {
 							order_id,
@@ -492,16 +342,11 @@ where
 			},
 		}
 
-		if should_persist {
-			self.persist_peer_state(counterparty_node_id).await.map_err(|e| {
-				APIError::APIMisuseError {
-					err: format!(
-						"Failed to persist peer state for {}: {}",
-						counterparty_node_id, e
-					),
-				}
-			})?;
-		}
+		self.per_peer_state.persist_peer_state(counterparty_node_id).await.map_err(|e| {
+			APIError::APIMisuseError {
+				err: format!("Failed to persist peer state for {}: {}", counterparty_node_id, e),
+			}
+		})?;
 
 		Ok(())
 	}
@@ -653,14 +498,13 @@ where
 	pub async fn order_payment_received(
 		&self, counterparty_node_id: PublicKey, order_id: LSPS1OrderId, method: PaymentMethod,
 	) -> Result<(), APIError> {
-		let mut should_persist = false;
 		match self.per_peer_state.read().unwrap().get(&counterparty_node_id) {
 			Some(inner_state_lock) => {
 				let mut peer_state_lock = inner_state_lock.lock().unwrap();
 				peer_state_lock.order_payment_received(&order_id, method).map_err(|e| {
 					APIError::APIMisuseError { err: format!("Failed to update order: {}", e) }
 				})?;
-				should_persist |= peer_state_lock.needs_persist();
+				peer_state_lock.needs_persist = true;
 			},
 			None => {
 				return Err(APIError::APIMisuseError {
@@ -669,16 +513,11 @@ where
 			},
 		}
 
-		if should_persist {
-			self.persist_peer_state(counterparty_node_id).await.map_err(|e| {
-				APIError::APIMisuseError {
-					err: format!(
-						"Failed to persist peer state for {}: {}",
-						counterparty_node_id, e
-					),
-				}
-			})?;
-		}
+		self.per_peer_state.persist_peer_state(counterparty_node_id).await.map_err(|e| {
+			APIError::APIMisuseError {
+				err: format!("Failed to persist peer state for {}: {}", counterparty_node_id, e),
+			}
+		})?;
 
 		Ok(())
 	}
@@ -691,14 +530,13 @@ where
 		&self, counterparty_node_id: PublicKey, order_id: LSPS1OrderId,
 		channel_info: LSPS1ChannelInfo,
 	) -> Result<(), APIError> {
-		let mut should_persist = false;
 		match self.per_peer_state.read().unwrap().get(&counterparty_node_id) {
 			Some(inner_state_lock) => {
 				let mut peer_state_lock = inner_state_lock.lock().unwrap();
 				peer_state_lock.order_channel_opened(&order_id, channel_info).map_err(|e| {
 					APIError::APIMisuseError { err: format!("Failed to update order: {}", e) }
 				})?;
-				should_persist |= peer_state_lock.needs_persist();
+				peer_state_lock.needs_persist = true;
 			},
 			None => {
 				return Err(APIError::APIMisuseError {
@@ -707,16 +545,11 @@ where
 			},
 		}
 
-		if should_persist {
-			self.persist_peer_state(counterparty_node_id).await.map_err(|e| {
-				APIError::APIMisuseError {
-					err: format!(
-						"Failed to persist peer state for {}: {}",
-						counterparty_node_id, e
-					),
-				}
-			})?;
-		}
+		self.per_peer_state.persist_peer_state(counterparty_node_id).await.map_err(|e| {
+			APIError::APIMisuseError {
+				err: format!("Failed to persist peer state for {}: {}", counterparty_node_id, e),
+			}
+		})?;
 
 		Ok(())
 	}
@@ -729,14 +562,13 @@ where
 	pub async fn order_failed_and_refunded(
 		&self, counterparty_node_id: PublicKey, order_id: LSPS1OrderId,
 	) -> Result<(), APIError> {
-		let mut should_persist = false;
 		match self.per_peer_state.read().unwrap().get(&counterparty_node_id) {
 			Some(inner_state_lock) => {
 				let mut peer_state_lock = inner_state_lock.lock().unwrap();
 				peer_state_lock.order_failed_and_refunded(&order_id).map_err(|e| {
 					APIError::APIMisuseError { err: format!("Failed to update order: {}", e) }
 				})?;
-				should_persist |= peer_state_lock.needs_persist();
+				peer_state_lock.needs_persist = true;
 			},
 			None => {
 				return Err(APIError::APIMisuseError {
@@ -745,16 +577,11 @@ where
 			},
 		}
 
-		if should_persist {
-			self.persist_peer_state(counterparty_node_id).await.map_err(|e| {
-				APIError::APIMisuseError {
-					err: format!(
-						"Failed to persist peer state for {}: {}",
-						counterparty_node_id, e
-					),
-				}
-			})?;
-		}
+		self.per_peer_state.persist_peer_state(counterparty_node_id).await.map_err(|e| {
+			APIError::APIMisuseError {
+				err: format!("Failed to persist peer state for {}: {}", counterparty_node_id, e),
+			}
+		})?;
 
 		Ok(())
 	}
